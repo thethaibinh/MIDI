@@ -1,0 +1,45 @@
+repositories:
+  catkin_simple:
+    type: git
+    url: https://github.com/catkin/catkin_simple.git
+    version: master
+
+  dodgedrone_simulation:
+    type: git
+    url: https://github.com/thethaibinh/dodgedrone_simulation.git
+    version: midi
+
+  eigen_catkin:
+    type: git
+    url: https://github.com/ethz-asl/eigen_catkin.git
+    version: master
+
+  flightmare:
+    type: git
+    url: https://github.com/thethaibinh/flightmare.git
+    version: midi
+
+  mav_comm:
+    type: git
+    url: https://github.com/ethz-asl/mav_comm.git
+    version: master
+
+  rpg_quadrotor_common:
+    type: git
+    url: https://github.com/uzh-rpg/rpg_quadrotor_common.git
+    version: master
+
+  rpg_quadrotor_control:
+    type: git
+    url: https://github.com/thethaibinh/rpg_quadrotor_control.git
+    version: custom-pos-control
+
+  vision_to_mavros:
+    type: git
+    url: https://github.com/thien94/vision_to_mavros.git
+    version: master
+
+  agile_flight:
+    type: git
+    url: https://github.com/thethaibinh/agile_flight.git
+    version: midi

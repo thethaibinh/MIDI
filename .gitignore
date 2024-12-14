@@ -1,0 +1,7 @@
+evaluation.yaml
+**/build
+*.project
+*.pydevproject
+*.cproject
+**/.settings
+**/.vscode

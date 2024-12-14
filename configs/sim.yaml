@@ -1,0 +1,61 @@
+# Simulation Flightmare
+# Scenario parameters
+runtime_mode: "flightmare" # "flightmare" or "mavros"
+collision_checking_method: "midi" # "midi" or "pyramid"
+visualise: yes
+world_frame_name: "world"
+vehicle_frame_name: "vehicle"
+topics:
+  depth: "/kingfisher/dodgeros_pilot/unity/depth"
+goal_coordinate:
+  north: 58
+  west: -5.0
+  up: 6.0
+depth_camera:
+  depth_scale: 1.0
+  depth_uncertainty:
+    ca0: 0.001
+    ca1: 0.0007
+    ca2: 0.005
+    cl0: 0.0
+    cl1: 0.0005
+    cl2: 0.0013
+
+# Planning parameters
+planning_cycle_time: 0.05
+checking_time_ratio: 0.6
+acc_planning_threshold: 0.1
+sampled_trajectories_threshold: 10000
+checked_trajectories_threshold: 200
+3d_planning: no
+2d_z_margin: 0.5
+traveling_cost: "distance" # "direction" or "distance"
+replan_factor: 3.0
+debug_num_trajectories: yes
+collision_probability_threshold: 5
+openmp_chunk_size: 16
+
+# Collision checking parameters
+true_vehicle_radius: 0.13
+planning_vehicle_radius: 0.4
+minimum_clear_distance: 1.2
+
+# SSTO trajectory generation parameters
+# Sampling parameters
+depth_upper_bound: 5.5
+depth_lower_bound: 1.7
+depth_sampling_margin: 0.3
+is_spiral_sampling: no
+spiral_sampling_step: 3
+# Kinematic constraints
+max_velocity_x: 2.0
+max_velocity_y: 1.5
+max_velocity_z: 2.0
+max_acceleration_x: 6.0
+max_acceleration_y: 3.0
+max_acceleration_z: 6.0
+
+# Control parameters
+trajectory_discretisation_cycle: 0.01
+go_to_goal_threshold: 3.0 # distance to goal for switching control
+mavros_control_mode: "kinematic"

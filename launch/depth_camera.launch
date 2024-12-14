@@ -1,0 +1,34 @@
+<launch>
+  <arg name="serial_no"             default=""/>
+  <arg name="json_file_path"        default=""/>
+  <arg name="camera"                default="d435"/>
+  <arg name="rviz"                  default="True"/>
+
+  <group ns="$(arg camera)">
+    <include file="$(find realsense2_camera)/launch/includes/nodelet.launch.xml">
+      <arg name="serial_no"         value="$(arg serial_no)"/>
+      <arg name="json_file_path"    value="$(arg json_file_path)"/>
+      <arg name="depth_width"       value="480"/>
+      <arg name="depth_height"      value="270"/>
+      <arg name="depth_fps"         value="60"/>
+      <arg name="color_width"       value="424"/>
+      <arg name="color_height"      value="240"/>
+      <arg name="color_fps"         value="60"/>
+      <arg name="enable_depth"      value="true"/>
+      <arg name="enable_color"      value="false"/>
+      <arg name="enable_infra1"     value="false"/>
+      <arg name="enable_infra2"     value="false"/>
+      <arg name="enable_fisheye"    value="false"/>
+      <arg name="enable_gyro"       value="false"/>
+      <arg name="enable_accel"      value="false"/>
+      <arg name="enable_pointcloud" value="false"/>
+      <arg name="enable_sync"       value="true"/>
+      <arg name="tf_prefix"         value="$(arg camera)"/>
+      <!-- <arg name="filters"           value="hole_filling, temporal, spatial, decimation"/> -->
+      <arg name="filters"           value="hole_filling, temporal, spatial, decimation"/>
+      <!-- <arg name="filters"           value="hole_filling"/> -->
+    </include>
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find realsense2_camera)/rviz/pointcloud.rviz" required="true" if="$(arg rviz)"/>
+  </group>
+</launch>

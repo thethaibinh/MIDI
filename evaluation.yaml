@@ -1,0 +1,38 @@
+rollout_1:
+  Success: true
+  number_crashes: 0
+  policy: midi
+  scenario: free
+  segment_times:
+    '10': 10.900000095367432
+    '15': 13.230000019073486
+    '20': 15.870000123977661
+    '25': 18.360000133514404
+    '30': 20.630000114440918
+    '35': 22.880000114440918
+    '40': 25.16000008583069
+    '45': 29.15000009536743
+    '5': 8.510000228881836
+    '50': 31.350000143051147
+    '55': 34.38000011444092
+  time_to_finish: .nan
+  travelled_distance: 83.07821329118106
+rollout_2:
+  Success: false
+  number_crashes: 1
+  policy: midi
+  scenario: free
+  segment_times:
+    '10': 10.849999904632568
+    '15': .nan
+    '20': .nan
+    '25': .nan
+    '30': .nan
+    '35': .nan
+    '40': .nan
+    '45': .nan
+    '5': 8.460000038146973
+    '50': .nan
+    '55': .nan
+  time_to_finish: .nan
+  travelled_distance: 20.585618704090624

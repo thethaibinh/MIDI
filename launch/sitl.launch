@@ -1,0 +1,42 @@
+<launch>
+    <arg name="quad_name" default="kingfisher"/>
+    <arg name="rviz" default="True"/>
+	<!-- <arg name="fcu_url" default="/dev/ttyACM0:57600" /> -->
+	<!-- <arg name="fcu_url" default="serial:///dev/ttyACM0:1500000" /> -->
+    <!-- real Ardupilot -->
+    <!-- <arg name="fcu_url" default="serial:///dev/ttyACM0:921600" /> -->
+    <!-- sim on PC, planner on PC -->
+	<arg name="fcu_url" default="udp://127.0.0.1:14551@14555" />
+    <!-- sim on PC, planner on Orin -->
+    <!--  -->
+    <!-- <arg name="fcu_url" default="udp://0.0.0.0:5000@5000" /> -->
+	<!-- <arg name="fcu_url" default="tcp://localhost" /> -->
+    <!-- <arg name="gcs_url" default="udp://141.132.238.42:5000@5000" /> -->
+    <!-- <arg name="gcs_url" default="udp://192.168.239.168:5000@5000" /> -->
+    <!-- This node will launch MAVROS -->
+    <include file="$(find mavros)/launch/apm.launch">
+        <arg name="fcu_url" value="$(arg fcu_url)" />
+    </include>
+
+    <!-- This node will launch the ROS driver for Realsense T265 -->
+    <!-- <include file="$(find realsense2_camera)/launch/rs_t265.launch"/> -->
+
+    <!-- Depth camera D435i -->
+    <include file="$(find midi)/launch/depth_camera.launch">
+        <arg name="rviz" value="False" />
+    </include>
+
+    <!-- This node will launch the node that bridges realsense-ros and MAVROS -->
+    <!-- <include file="$(find vision_to_mavros)/launch/t265_tf_to_mavros.launch"/> -->
+
+    <!-- Visualization -->
+    <node pkg="rviz" type="rviz" name="viz_face" args="-d $(find midi)/resources/rviz/envsim.rviz"
+          ns="$(arg quad_name)" if="$(arg rviz)"/>
+
+    <!-- Trajectory Planner -->
+    <node name="planner" pkg="midi" type="main"/>
+        <!-- Autopilot -->
+        <rosparam file="$(find position_controller)/parameters/default.yaml" />
+        <param name="scenario" value="sitl" />
+
+</launch>

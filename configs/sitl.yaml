@@ -1,0 +1,68 @@
+# Ardupilot SITL on PC, planner on Orin/PC
+runtime_mode: "mavros" # "flightmare" or "mavros"
+collision_checking_method: "midi" # "midi" or "pyramid"
+visualise: yes
+# Mavros frame names
+world_frame_name: "map"
+vehicle_frame_name: "base_link"
+
+# Planning parameters
+topics:
+  depth: "/d435/depth/image_rect_raw"
+goal_coordinate: # World coordinates in meters
+  north: 5.6
+  west: 0.0
+  up: 1.0
+depth_camera:
+  # RealSense D435 depth camera
+  depth_scale: 0.001
+  decimation_factor: 2
+  focal_length: 243.173
+  cx: 244.014
+  cy: 132.35
+  depth_uncertainty:
+    ca0: 0.001
+    ca1: 0.0007
+    ca2: 0.005
+    cl0: 0.0
+    cl1: 0.0005
+    cl2: 0.0013
+
+# Planning parameters
+planning_cycle_time: 0.05
+checking_time_ratio: 0.6
+acc_planning_threshold: 0.1
+sampled_trajectories_threshold: 8000
+checked_trajectories_threshold: 100
+3d_planning: no
+2d_z_margin: 0.1
+traveling_cost: "direction" # "direction" or "distance"
+replan_factor: 3.0
+debug_num_trajectories: yes
+openmp_chunk_size: 16
+
+# Collision checking parameters
+true_vehicle_radius: 0.16
+planning_vehicle_radius: 0.20
+minimum_clear_distance: 1.0
+collision_probability_threshold: 5
+
+# SSTO trajectory generation parameters
+# Sampling parameters
+depth_upper_bound: 2.0
+depth_lower_bound: 1.5
+depth_sampling_margin: 0.2
+is_spiral_sampling: no
+spiral_sampling_step: 3
+# Kinematic constraints in camera coordinate (Right-Down-Forward)
+max_velocity_x: 1.0
+max_velocity_y: 0.5
+max_velocity_z: 1.0
+max_acceleration_x: 2.0
+max_acceleration_y: 1.0
+max_acceleration_z: 2.0
+
+# Control parameters
+trajectory_discretisation_cycle: 0.01
+go_to_goal_threshold: 1.2 # distance to goal for switching control
+mavros_control_mode: "kinematic"
