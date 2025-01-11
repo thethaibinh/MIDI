@@ -16,9 +16,9 @@ We currently support Ubuntu 20.04 with ROS noetic and CUDA 12.7. Other setups ar
 
 2. In addition, make sure to have ROS installed. Follow [this guide](http://wiki.ros.org/noetic/Installation/Ubuntu) and install ROS Noetic if you don't already have it.
 
-3. Install catkin tools.
+3. Install catkin tools, vcstool.
 ```
-sudo apt install python3-catkin-tools
+sudo apt install python3-catkin-tools python3-vcstool
 ```
 4. Install [anaconda](https://www.anaconda.com/).
 5. Install CUDA 12.7 following [this guide](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=20.04).
