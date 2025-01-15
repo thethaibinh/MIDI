@@ -13,6 +13,13 @@ echo "export OMP_CANCELLATION=true" >> ~/.bashrc
 echo "export OMP_NUM_THREADS=4" >> ~/.bashrc
 
 sudo apt install python3-pip
+# Remove CUDA
+sudo apt-get --purge remove "*cublas*" "*cufft*" "*curand*" \
+"*cusolver*" "*cusparse*" "*npp*" "*nvjpeg*" "cuda*" "nsight*" -y
+sudo apt-get --purge remove "*nvidia*" -y
+sudo apt-get autoremove -y
+sudo apt-get autoclean -y
+sudo rm -rf /usr/local/cuda*
 
 echo "Creating an conda environment from the environment.yaml file. Make sure you have anaconda installed"
 conda env create -f environment.yaml
@@ -42,6 +49,18 @@ echo "Will ask for sudo permissions:"
 sudo apt update
 sudo apt install -y --no-install-recommends build-essential cmake libzmqpp-dev libopencv-dev unzip python3-catkin-tools
 sudo apt-get install ros-noetic-rqt ros-noetic-rqt-common-plugins ros-noetic-rqt-robot-plugins ros-noetic-mavros ros-noetic-grid-map-rviz-plugin
+
+# 12.6
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+rm cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get -y install cuda-toolkit-12-6
+sudo apt-get install -y nvidia-open
+sudo apt-get install -y cuda-drivers
+sudo apt-get remove -y nvidia-driver-565
+sudo apt-get remove -y nvidia-driver-565-open
+sudo apt-get install -y nvidia-driver-535
 
 echo "Ignoring unused Flightmare folders!"
 touch $parent_path/flightmare/flightros/CATKIN_IGNORE
