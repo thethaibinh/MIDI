@@ -46,6 +46,10 @@ for i in $(eval echo {1..$N})
   python3 benchmarking_node.py --policy=midi &
   PY_PID="$!"
   cd -
+  cd ../cscv/
+  CUDA_VISIBLE_DEVICES=0 python3 sceneflow_node.py --model=$parent_path/cscv/checkpoints/Demo_scaleflowpp.pth --mixed_precision --start=0 &
+  SF_PID="$!"
+  cd -
   sleep 0.5
   rostopic pub /kingfisher/start_navigation std_msgs/Empty "{}" --once
 
@@ -64,4 +68,5 @@ if [ $ROS_PID ]
 then
   kill -SIGINT "$ROS_PID"
   kill -SIGINT "$PY_PID"
+  kill -SIGINT "$SF_PID"
 fi

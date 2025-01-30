@@ -7,10 +7,12 @@ world_frame_name: "world"
 vehicle_frame_name: "vehicle"
 topics:
   depth: "/kingfisher/dodgeros_pilot/unity/depth"
+  rgb: "/kingfisher/dodgeros_pilot/unity/image"
+  scene_flow: "/scene_flow/depth_velocity"
 goal_coordinate:
-  north: 58
-  west: -5.0
-  up: 6.0
+  north: 60
+  west: 0.0
+  up: 5.0
 depth_camera:
   depth_scale: 1.0
   depth_uncertainty:
@@ -27,7 +29,7 @@ checking_time_ratio: 0.6
 acc_planning_threshold: 0.1
 sampled_trajectories_threshold: 10000
 checked_trajectories_threshold: 200
-3d_planning: no
+3d_planning: yes
 2d_z_margin: 0.5
 traveling_cost: "distance" # "direction" or "distance"
 replan_factor: 3.0

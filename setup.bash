@@ -76,6 +76,15 @@ rm $parent_path/flightmare/flightrender/RPG_Flightmare_Data.zip
 
 chmod +x $parent_path/flightmare/flightrender/RPG_Flightmare.x86_64
 
+echo "Downloading Trajectories..."
+wget "https://download.ifi.uzh.ch/rpg/Flightmare/trajectories.zip" --directory-prefix=$parent_path/flightmare/flightpy/configs/vision
+
+echo "Unziping Trajectories... (this might take a while)"
+unzip -o $parent_path/flightmare/flightpy/configs/vision/trajectories.zip -d $parent_path/flightmare/flightpy/configs/vision/ | awk 'BEGIN {ORS=" "} {if(NR%50==0)print "."}'
+
+echo "Removing Trajectories zip file"
+rm $parent_path/flightmare/flightpy/configs/vision/trajectories.zip
+
 echo "conda activate agileflight" >> ~/.bashrc
 
 echo "Done!"
