@@ -28,7 +28,7 @@ class MonotonicSegment3 : public common_math::ThirdOrderSegment {
    * @param startTime Endpoint of the trajectory [seconds]
    * @param endTime Endpoint of the trajectory [seconds]
    */
-  MonotonicSegment3(const std::vector<Eigen::Vector3d> coeffs, const double& startTime, const double& endTime)
+  MonotonicSegment3(const std::vector<Eigen::Vector3d>& coeffs, const double& startTime, const double& endTime)
       : common_math::ThirdOrderSegment(coeffs, startTime, endTime) {
     double startVal = common_math::ThirdOrderSegment::get_axis_value(2, startTime);
     double endVal = common_math::ThirdOrderSegment::get_axis_value(2, endTime);
@@ -52,7 +52,9 @@ class MonotonicSegment3 : public common_math::ThirdOrderSegment {
     }
     return deepestDepth < rhsDeepestDepth;
   }
-
+  bool is_increasing_depth() const {
+    return increasing_depth;
+  }
   //! True if the position of the trajectory along the z-axis monotonically increases in time
   bool increasing_depth;
 };

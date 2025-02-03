@@ -24,7 +24,7 @@
 
 const double PI = 3.141592653589793238463L;
 const double M_2PI = 2 * PI;
-const double eps = 1e-12;
+const double EPS = 1e-12;
 
 class Polynomial {
  private:

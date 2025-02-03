@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 set(PROJECT_NAME midi)
-project(${PROJECT_NAME} CUDA CXX)
+project(${PROJECT_NAME} CXX)
 
 find_package(catkin_simple REQUIRED)
 catkin_simple()
@@ -15,25 +15,11 @@ set(CMAKE_BUILD_TYPE Release)
 find_package(OpenCV REQUIRED)
 find_package(Boost COMPONENTS program_options REQUIRED)
 
-find_package(CUDA REQUIRED)
-enable_language(CUDA)
-# Add CUDA include directories
-include_directories(
-    ${CUDA_INCLUDE_DIRS}
-)
-
 find_package(OpenMP REQUIRED)
 # OpenMP settings
 if(OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
-
-# CUDA settings
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_75")
-set(CMAKE_CUDA_ARCHITECTURES 75)
-# For Orin NX (uncomment if needed):
-# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_87")
-# set(CMAKE_CUDA_ARCHITECTURES 87)
 
 # Add submodules
 add_subdirectory(modules/ruckig)
@@ -50,20 +36,10 @@ cs_add_library(${PROJECT_NAME}
     src/planner_node_parameters.cpp
 )
 
-# Create CUDA library
-cuda_add_library(cuda_collision_checker
-    src/cuda_collision_checker.cu
-)
-
 # Create the executable
 cs_add_executable(main src/main.cpp)
 
 # Link libraries
-target_link_libraries(${PROJECT_NAME}
-    cuda_collision_checker
-    ${CUDA_LIBRARIES}
-)
-
 target_link_libraries(
     main
     ${PROJECT_NAME}

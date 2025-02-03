@@ -31,6 +31,7 @@ class PinholeCamera {
   PinholeCamera(const double focal_length, const double cx, const double cy,
                 const uint16_t width = 320, const uint16_t height = 240,
                 const std::vector<double>& cov_coeffs = {},
+                const std::vector<double>& dynamic_pos_cov_coeffs = {},
                 const double true_radius = 0.26f,
                 const double planning_radius = 0.55f,
                 const double minimum_clear_distance = 0.5)
@@ -40,11 +41,12 @@ class PinholeCamera {
       _width(width),
       _height(height),
       _cov_coeffs(cov_coeffs),
+      _dynamic_pos_cov_coeffs(dynamic_pos_cov_coeffs),
       _true_vehicle_radius(true_radius),
       _planning_vehicle_radius(planning_radius),
       _minimum_clear_distance(minimum_clear_distance) {}
 
-  Eigen::Vector3d get_covariance_matrix(const Eigen::Vector3d& depth_point) const {
+  Eigen::Vector3d get_depth_noise_covariance_matrix(const Eigen::Vector3d& depth_point) const {
     double ca0 = _cov_coeffs[0];
     double ca1 = _cov_coeffs[1];
     double ca2 = _cov_coeffs[2];
@@ -56,6 +58,15 @@ class PinholeCamera {
     double sigma_lx = cl0 + cl1 * depth_point.z() + cl2 * std::abs(depth_point.x());
     double sigma_ly = cl0 + cl1 * depth_point.z() + cl2 * std::abs(depth_point.y());
     return Eigen::Vector3d(sigma_lx, sigma_ly, sigma_a);
+  }
+
+  Eigen::Vector3d get_dynamic_pos_covariance_matrix() const
+  {
+      // These are dynamic position uncertainty due to uncertainty in velocity
+      double sigma_x = _dynamic_pos_cov_coeffs[0];
+      double sigma_y = _dynamic_pos_cov_coeffs[1];
+      double sigma_z = _dynamic_pos_cov_coeffs[2];
+      return Eigen::Vector3d(sigma_x, sigma_y, sigma_z);
   }
 
   //! Computes the 3D position of a point given a position in pixel coordinates
@@ -188,6 +199,7 @@ class PinholeCamera {
   double _planning_vehicle_radius;  // vehicle radius for planning
   double _minimum_clear_distance;  // Minimum distance for collision checking
   std::vector<double> _cov_coeffs;
+  std::vector<double> _dynamic_pos_cov_coeffs;
 };
 
 } // namespace common_math

@@ -277,10 +277,15 @@ static void run_trajectory_coverage_benchmark(
       depth_uncertainty_coeffs.push_back(0.0);
       depth_uncertainty_coeffs.push_back(0.0005);
       depth_uncertainty_coeffs.push_back(0.0013);
+      std::vector<double> dynamic_pos_uncertainty_coeffs;
+      dynamic_pos_uncertainty_coeffs.push_back(0.3);
+      dynamic_pos_uncertainty_coeffs.push_back(0.3);
+      dynamic_pos_uncertainty_coeffs.push_back(0.3);
       // Store the coefficients in a member variable or use them as needed
       PinholeCamera camera(camera_intrinsics.f, camera_intrinsics.cx,
                            camera_intrinsics.cy, depth_mat.cols, depth_mat.rows,
                            depth_uncertainty_coeffs,
+                           dynamic_pos_uncertainty_coeffs,
                            planner_specs.physical_vehicle_radius,
                            planner_specs.vehicle_radius_for_planning,
                            planner_specs.minimum_collision_distance);

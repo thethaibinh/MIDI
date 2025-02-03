@@ -16,7 +16,6 @@
  */
 
 #include "depth_uncertainty_planner/base_planner.hpp"
-#include "depth_uncertainty_planner/cuda_collision_checker.cuh"
 #include <omp.h>
 
 using namespace std::chrono;
@@ -129,20 +128,20 @@ bool DuPlanner::find_lowest_cost_trajectory(
     // Skip trajectory if it is too short
     if (candidate_trajectory.get_duration() <= 1e-6) continue;
 
-    std::vector<CudaSegment*> cuda_segments = get_cuda_segments(candidate_trajectory);
+    std::vector<Segment*> segments = get_segments(candidate_trajectory);
     // Skip trajectory if it has no segments (empty trajectory)
-    if (cuda_segments.empty()) continue;
+    if (segments.empty()) continue;
 
     bool is_collision_free = true;
-    for (uint8_t i = 0; i < cuda_segments.size(); i++) {
-      if (const auto* second_order_segment = dynamic_cast<const common_math::CudaSecondOrderSegment*>(cuda_segments[i])) {
+    for (uint8_t i = 0; i < segments.size(); i++) {
+      if (const auto* second_order_segment = dynamic_cast<const common_math::SecondOrderSegment*>(segments[i])) {
         if (!second_order_segment->is_monotonically_increasing_depth()) {
           is_collision_free = false;
           break;
         }
-        is_collision_free &= is_cuda_segment2_collision_free(second_order_segment, trajectory_collision_probability, mahalanobis_distance);
-      } else if (const auto* third_order_segment = dynamic_cast<const common_math::CudaThirdOrderSegment*>(cuda_segments[i])) {
-        is_collision_free &= is_cuda_segment3_collision_free(third_order_segment);
+        is_collision_free &= is_segment2_collision_free(second_order_segment, trajectory_collision_probability, mahalanobis_distance);
+      } else if (const auto* third_order_segment = dynamic_cast<const common_math::ThirdOrderSegment*>(segments[i])) {
+        is_collision_free &= is_segment3_collision_free(third_order_segment);
       } else {
         is_collision_free = false;
         break;
@@ -229,101 +228,6 @@ int DuPlanner::scan_depth() {
     return 1;
 }
 
-std::vector<CudaSegment*> DuPlanner::get_cuda_segments(
-  const ruckig::Trajectory<3> traj) {
-  std::vector<CudaSegment*> segments;
-  auto profile_array = traj.get_profiles();
-  // We only consider one-target-waypoint trajectory
-  assert(profile_array.size() == 1);
-  auto profiles = profile_array[0];
-  // Confirming there are 3 DOFs in a trajectory
-  uint8_t num_dof = profiles.size();
-  assert(num_dof == 3);
-
-  // Adding two possible pre-trajectories (brake/accel) if there is any
-  double brake_duration = profiles[0].brake.duration;
-  if (brake_duration > 1e-6) {
-    Eigen::Vector3d j(profiles[0].brake.j[0], profiles[1].brake.j[0], profiles[2].brake.j[0]);
-    Eigen::Vector3d a(profiles[0].brake.a[0], profiles[1].brake.a[0],
-                      profiles[2].brake.a[0]);
-    Eigen::Vector3d v0(profiles[0].brake.v[0], profiles[1].brake.v[0],
-                       profiles[2].brake.v[0]);
-    Eigen::Vector3d p0(profiles[0].brake.p[0], profiles[1].brake.p[0],
-                       profiles[2].brake.p[0]);
-    if (collision_checking_method == CollisionCheckingMethod::PYRAMID) {
-      CudaVector3d cuda_coeffs[4];
-      cuda_coeffs[0] = CudaVector3d(j[0] / 6.0, j[1] / 6.0, j[2] / 6.0);
-      cuda_coeffs[1] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[2] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[3] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaThirdOrderSegment* seg = new CudaThirdOrderSegment(cuda_coeffs, 0.0, brake_duration);
-      segments.push_back(seg);
-    } else if (collision_checking_method == CollisionCheckingMethod::MIDI) {
-      CudaVector3d cuda_coeffs[3];
-      cuda_coeffs[0] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[1] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[2] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaSecondOrderSegment* seg = new CudaSecondOrderSegment(cuda_coeffs, 0.0, brake_duration);
-      segments.push_back(seg);
-    }
-  }
-  double accel_duration = profiles[0].accel.duration;
-  if (accel_duration > 1e-6) {
-    Eigen::Vector3d j(profiles[0].accel.j[0], profiles[1].j[0], profiles[2].accel.j[0]);
-    Eigen::Vector3d a(profiles[0].accel.a[0], profiles[1].accel.a[0],
-                      profiles[2].accel.a[0]);
-    Eigen::Vector3d v0(profiles[0].accel.v[0], profiles[1].accel.v[0],
-                       profiles[2].accel.v[0]);
-    Eigen::Vector3d p0(profiles[0].accel.p[0], profiles[1].accel.p[0],
-                       profiles[2].accel.p[0]);
-    if (collision_checking_method == CollisionCheckingMethod::PYRAMID) {
-      CudaVector3d cuda_coeffs[4];
-      cuda_coeffs[0] = CudaVector3d(j[0] / 6.0, j[1] / 6.0, j[2] / 6.0);
-      cuda_coeffs[1] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[2] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[3] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaThirdOrderSegment* seg = new CudaThirdOrderSegment(cuda_coeffs, 0.0, accel_duration);
-      segments.push_back(seg);
-    } else if (collision_checking_method == CollisionCheckingMethod::MIDI) {
-      CudaVector3d cuda_coeffs[3];
-      cuda_coeffs[0] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[1] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[2] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaSecondOrderSegment* seg = new CudaSecondOrderSegment(cuda_coeffs, 0.0, accel_duration);
-      segments.push_back(seg);
-    }
-  }
-
-  // Then adding possible 7 sections of the trajectory
-  uint8_t num_sec = profiles[0].t.size();
-  assert(num_sec == 7);
-  for (uint8_t i = 0; i < num_sec; i++) {
-    double end_time = profiles[0].t[i];
-    if (fabs(end_time) < 1e-6) continue;
-    Eigen::Vector3d j(profiles[0].j[i], profiles[1].j[i], profiles[2].j[i]);
-    Eigen::Vector3d a(profiles[0].a[i], profiles[1].a[i], profiles[2].a[i]);
-    Eigen::Vector3d v0(profiles[0].v[i], profiles[1].v[i], profiles[2].v[i]);
-    Eigen::Vector3d p0(profiles[0].p[i], profiles[1].p[i], profiles[2].p[i]);
-    if (collision_checking_method == CollisionCheckingMethod::PYRAMID) {
-      CudaVector3d cuda_coeffs[4];
-      cuda_coeffs[0] = CudaVector3d(j[0] / 6.0, j[1] / 6.0, j[2] / 6.0);
-      cuda_coeffs[1] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[2] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[3] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaThirdOrderSegment* seg = new CudaThirdOrderSegment(cuda_coeffs, 0.0, end_time);
-      segments.push_back(seg);
-    } else if (collision_checking_method == CollisionCheckingMethod::MIDI) {
-      CudaVector3d cuda_coeffs[3];
-      cuda_coeffs[0] = CudaVector3d(a[0] / 2.0, a[1] / 2.0, a[2] / 2.0);
-      cuda_coeffs[1] = CudaVector3d(v0[0], v0[1], v0[2]);
-      cuda_coeffs[2] = CudaVector3d(p0[0], p0[1], p0[2]);
-      CudaSecondOrderSegment* seg = new CudaSecondOrderSegment(cuda_coeffs, 0.0, end_time);
-      segments.push_back(seg);
-    }
-  }
-  return segments;
-}
-
 std::vector<Segment*> DuPlanner::get_segments(
   const ruckig::Trajectory<3> traj) {
   std::vector<Segment*> segments;
@@ -393,57 +297,45 @@ std::vector<Segment*> DuPlanner::get_segments(
   return segments;
 }
 
-bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* segment, double& trajectory_collision_probability, double& mahalanobis_distance) {
-    return CudaCollisionChecker::check_for_collision(
-        segment,
-        trajectory_collision_probability,
-        mahalanobis_distance,
-        _depth_data,
-        _camera
-    );
-}
-
-bool DuPlanner::is_cuda_segment2_collision_free(const CudaSecondOrderSegment* original_segment, double& trajectory_collision_probability, double& mahalanobis_distance) {
-  CudaPinholeCamera cuda_camera = CudaConverter::toCuda(_camera);
+bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_segment, double& trajectory_collision_probability, double& mahalanobis_distance) {
+  PinholeCamera camera = _camera;
   // Skip if the segment is too short
   if (original_segment->get_duration() <= 1e-6) return true;
   // Skip if the segment is closer than the vehicle radius
-  if (original_segment->get_end_point().z <= cuda_camera.get_true_vehicle_radius()) return true;
+  if (original_segment->get_end_point().z() <= camera.get_true_vehicle_radius()) return true;
 
   double start_checking_time = 0.0;
   // Split the part of the segment that is closer than the vehicle radius
-  if (original_segment->get_start_point().z < cuda_camera.get_true_vehicle_radius()) {
-    uint8_t num_roots = original_segment->solve_first_time_at_depth(cuda_camera.get_true_vehicle_radius(), start_checking_time);
+  if (original_segment->get_start_point().z() < camera.get_true_vehicle_radius()) {
+    uint8_t num_roots = original_segment->solve_first_time_at_depth(camera.get_true_vehicle_radius(), start_checking_time);
     // Missing root means the segment is somehow still inside the vehicle radius
     if (num_roots == 0) return true;
     if (start_checking_time >= original_segment->get_end_time()) return true;
   }
-  CudaVector3d coeffs[3];
-  original_segment->get_coeffs(coeffs);
-  CudaSecondOrderSegment segment(coeffs, start_checking_time, original_segment->get_end_time());
+  const std::vector<Eigen::Vector3d> coeffs = original_segment->get_coeffs();
+  SecondOrderSegment segment(coeffs, start_checking_time, original_segment->get_end_time());
   if (segment.get_duration() < 1e-6) return true;
 
   // Compute interest region for collision checking
-  int16_t boundary[4];
-  segment.get_projection_boundary(cuda_camera, boundary);
+  const std::vector<int16_t> boundary = segment.get_projection_boundary(camera);
   const int16_t left = boundary[0];
   const int16_t top = boundary[1];
   const int16_t right = boundary[2];
   const int16_t bottom = boundary[3];
 
-  if (left < 0 || right > cuda_camera.get_width() || top < 0 ||
-      bottom > cuda_camera.get_height()) {
+  if (left < 0 || right > camera.get_width() || top < 0 ||
+      bottom > camera.get_height()) {
     ROS_ERROR("Boundary out of frame");
     return false;
   }
 
   // Check for collision and compute probability for all pixels in bb_ltrb
-  const CudaVector3d endpoint = segment.get_end_point();
-  const double checking_depth = endpoint.z + cuda_camera.get_planning_vehicle_radius();
-  const uint16_t img_width = cuda_camera.get_width();
-  const double true_vehicle_radius = cuda_camera.get_true_vehicle_radius();
-  const double min_clear_distance = cuda_camera.get_minimum_clear_distance();
-  const double planning_vehicle_radius = cuda_camera.get_planning_vehicle_radius();
+  const Eigen::Vector3d endpoint = segment.get_end_point();
+  const double checking_depth = endpoint.z() + camera.get_planning_vehicle_radius();
+  const uint16_t img_width = camera.get_width();
+  const double true_vehicle_radius = camera.get_true_vehicle_radius();
+  const double min_clear_distance = camera.get_minimum_clear_distance();
+  const double planning_vehicle_radius = camera.get_planning_vehicle_radius();
   // Evaluate the Euclidean distance of all depth pixels in bb_ltrb to check for collision
   double segment_collision_probability = 0.0;
   std::atomic<bool> collision_detected{false};  // Make collision_detected atomic
@@ -467,7 +359,7 @@ bool DuPlanner::is_cuda_segment2_collision_free(const CudaSecondOrderSegment* or
       // Skip pixels with depth greater than checking_depth + 1 meter
       if (spatial_z > (checking_depth + 1)) continue;
 
-      const CudaVector3d depth_point = cuda_camera.deproject_pixel_to_point(x, y, spatial_z);
+      const Eigen::Vector3d depth_point = camera.deproject_pixel_to_point(x, y, spatial_z);
 
       // Skip collision checking for pixels with depth smaller than the minimum collision distance
       if (spatial_z < min_clear_distance) {
@@ -479,7 +371,7 @@ bool DuPlanner::is_cuda_segment2_collision_free(const CudaSecondOrderSegment* or
 
       // Skip collision checking for pixels with depth greater than checking_depth
       if (spatial_z > checking_depth) {
-        double prob = segment.get_collision_probability(depth_point, cuda_camera, mahalanobis_distance);
+        double prob = segment.get_du_collision_probability(depth_point, camera, mahalanobis_distance);
         segment_collision_probability = std::max(segment_collision_probability, prob);
         if (prob > _collision_probability_threshold) {
           collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store
@@ -493,7 +385,7 @@ bool DuPlanner::is_cuda_segment2_collision_free(const CudaSecondOrderSegment* or
         collision_detected.store(true, std::memory_order_relaxed);
         continue;
       }
-      double prob = segment.get_collision_probability(depth_point, cuda_camera, mahalanobis_distance);
+      double prob = segment.get_du_collision_probability(depth_point, camera, mahalanobis_distance);
       segment_collision_probability = std::max(segment_collision_probability, prob);
       if (prob > _collision_probability_threshold) {
         collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store

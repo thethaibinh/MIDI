@@ -29,6 +29,10 @@ depth_camera:
     cl2: 0.0013
 
 # Planning parameters
+dynamic_pos_uncertainty:
+  x: 0.3
+  y: 0.3
+  z: 0.3
 planning_cycle_time: 0.05
 checking_time_ratio: 0.6
 acc_planning_threshold: 0.1

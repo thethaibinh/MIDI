@@ -57,57 +57,11 @@ std::vector<MonotonicSegment3> DuPlanner::get_monotonic_segments(const ThirdOrde
   return monotonic_sections;
 }
 
-std::vector<CudaMonotonicSegment3> DuPlanner::get_cuda_monotonic_segments(const CudaThirdOrderSegment* segment) {
-  // This function exploits the property described in Section II.B of the
-  // RAPPIDS paper
-
-  // Compute the coefficients of \dot{d}_z(t)
-  CudaVector3d traj_derivative_coeffs[3];
-  segment->get_derivative_coeffs(traj_derivative_coeffs);
-  double c[3] = {traj_derivative_coeffs[0].z, traj_derivative_coeffs[1].z,
-                 traj_derivative_coeffs[2].z};  // Just shortening the names
-
-  // Compute the times at which the segment changes direction along the z-axis
-  double switching_points_and_terminals[6];
-  // Does not count start and end time
-  uint8_t switching_point_count = segment->get_depth_switching_points_and_terminals(switching_points_and_terminals) - 2;
-
-  std::vector<CudaMonotonicSegment3> monotonic_sections;
-  // We don't iterate until root_count + 2 because we need to find pairs of roots
-  for (unsigned i = 0; i < switching_point_count + 1; i++) {
-    if (switching_points_and_terminals[i] < segment->get_start_time()) {
-      // Skip root if it's before start time
-      continue;
-    } else if (fabs(switching_points_and_terminals[i] - switching_points_and_terminals[i + 1]) < 1e-6) {
-      // Skip root because it's a duplicate
-      continue;
-    } else if (switching_points_and_terminals[i] >= segment->get_end_time()) {
-      // We're done because the roots are in ascending order
-      break;
-    }
-    // Add a section between the current root and the next root after checking
-    // that the next root is valid We already know that roots[i+1] is greater
-    // than the start time because roots[i] is greater than the start time and
-    // roots is sorted
-    if (switching_points_and_terminals[i + 1] <= segment->get_end_time()) {
-      CudaVector3d coeffs[4];
-      segment->get_coeffs(coeffs);
-      monotonic_sections.push_back(
-        CudaMonotonicSegment3(coeffs, switching_points_and_terminals[i], switching_points_and_terminals[i + 1]));
-    } else {
-      // We're done because the next section is out of the range
-      break;
-    }
-  }
-  std::sort(monotonic_sections.begin(), monotonic_sections.end());
-  return monotonic_sections;
-}
-
-bool DuPlanner::is_cuda_segment3_collision_free(const CudaThirdOrderSegment* segment) {
-  CudaPinholeCamera cuda_camera = CudaConverter::toCuda(_camera);
+bool DuPlanner::is_segment3_collision_free(const ThirdOrderSegment* segment) {
+  PinholeCamera camera = _camera;
   // Split segment into sections with monotonically changing depth
-  std::vector<CudaMonotonicSegment3> monotonic_sections =
-    get_cuda_monotonic_segments(segment);
+  std::vector<MonotonicSegment3> monotonic_sections =
+    get_monotonic_segments(segment);
   while (monotonic_sections.size() > 0) {
     // Check if we've used up all of our computation time
     if (duration_cast<microseconds>(high_resolution_clock::now() - start_time)
@@ -116,12 +70,12 @@ bool DuPlanner::is_cuda_segment3_collision_free(const CudaThirdOrderSegment* seg
     }
 
     // Get a monotonic section to check
-    CudaMonotonicSegment3 mono_traj = monotonic_sections.back();
+    MonotonicSegment3 mono_traj = monotonic_sections.back();
     monotonic_sections.pop_back();
 
     // Find the pixel corresponding to the endpoint of this section (deepest
     // depth)
-    CudaVector3d start_point, end_point;
+    Eigen::Vector3d start_point, end_point;
     if (mono_traj.is_increasing_depth()) {
       start_point = mono_traj.get_point(mono_traj.get_start_time());
       end_point = mono_traj.get_point(mono_traj.get_end_time());
@@ -132,14 +86,13 @@ bool DuPlanner::is_cuda_segment3_collision_free(const CudaThirdOrderSegment* seg
 
     // Ignore the segment section if it's closer than the minimum collision
     // checking distance
-    if (start_point.z < cuda_camera.get_minimum_clear_distance() && end_point.z < cuda_camera.get_minimum_clear_distance()) {
+    if (start_point.z() < camera.get_minimum_clear_distance() && end_point.z() < camera.get_minimum_clear_distance()) {
       continue;
     }
     // Try to find pyramid that contains end_point
-    int16_t end_point_pixel[2];
-    cuda_camera.project_point_to_pixel(end_point, end_point_pixel);
+    Eigen::Vector2i end_point_pixel = camera.project_point_to_pixel(end_point);
     Pyramid collision_check_pyramid;
-    bool pyramid_found = find_containing_pyramid(end_point_pixel[0], end_point_pixel[1], end_point.z, collision_check_pyramid);
+    bool pyramid_found = find_containing_pyramid(end_point_pixel[0], end_point_pixel[1], end_point.z(), collision_check_pyramid);
     if (!pyramid_found) {
       // No pyramids containing end_point were found, try to make a new pyramid
       if (_pyramids.size() >= _max_num_pyramids ||
@@ -152,7 +105,7 @@ bool DuPlanner::is_cuda_segment3_collision_free(const CudaThirdOrderSegment* seg
       high_resolution_clock::time_point start_inflate =
         high_resolution_clock::now();
       bool pyramid_generated = inflate_pyramid(end_point_pixel[0], end_point_pixel[1],
-                                               end_point.z, collision_check_pyramid);
+                                               end_point.z(), collision_check_pyramid);
       _pyramid_gen_time_nanoseconds +=
         duration_cast<nanoseconds>(high_resolution_clock::now() - start_inflate)
           .count();
@@ -177,13 +130,12 @@ bool DuPlanner::is_cuda_segment3_collision_free(const CudaThirdOrderSegment* seg
       // The segment collides with at least lateral face of the pyramid. Split
       // the segment where it intersects, and add the section outside the
       // pyramid for further collision checking.
-      CudaVector3d coeffs[4];
-      mono_traj.get_coeffs(coeffs);
+      const std::vector<Eigen::Vector3d> coeffs = mono_traj.get_coeffs();
       if (mono_traj.is_increasing_depth()) {
-        monotonic_sections.push_back(CudaMonotonicSegment3(
+        monotonic_sections.push_back(MonotonicSegment3(
           coeffs, mono_traj.get_start_time(), collision_time));
       } else {
-        monotonic_sections.push_back(CudaMonotonicSegment3(
+        monotonic_sections.push_back(MonotonicSegment3(
           coeffs, collision_time, mono_traj.get_end_time()));
       }
     }
@@ -216,7 +168,7 @@ bool DuPlanner::find_containing_pyramid(int pixel_x, int pixel_y, double depth, 
   return false;
 }
 
-bool DuPlanner::find_deepest_collision_time(CudaMonotonicSegment3 mono_traj,
+bool DuPlanner::find_deepest_collision_time(MonotonicSegment3 mono_traj,
                                             Pyramid pyramid,
                                             double& out_collision_time) {
   // This function exploits the property described in Section II.C of the
@@ -228,8 +180,7 @@ bool DuPlanner::find_deepest_collision_time(CudaMonotonicSegment3 mono_traj,
   } else {
     out_collision_time = mono_traj.get_end_time();
   }
-  CudaVector3d coeffs[4];
-  mono_traj.get_coeffs(coeffs);
+  const std::vector<Eigen::Vector3d> coeffs = mono_traj.get_coeffs();
   for (Eigen::Vector3d normal : pyramid.plane_normals) {
     // Compute the coefficients of d(t) (distance to the lateral face of the
     // pyramid)

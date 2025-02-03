@@ -80,6 +80,13 @@ bool PlannerNode::loadParameters() {
   temp.push_back(planner_config["depth_camera"]["depth_uncertainty"]["cl2"].as<double>());
   _depth_uncertainty_coeffs = temp;
 
+
+  // Dynamic position uncertainty coefficients
+  temp.clear();
+  temp.push_back(planner_config["dynamic_pos_uncertainty"]["x"].as<double>());
+  temp.push_back(planner_config["dynamic_pos_uncertainty"]["y"].as<double>());
+  temp.push_back(planner_config["dynamic_pos_uncertainty"]["z"].as<double>());
+  _dynamic_pos_cov_coeffs = temp;
   // Planning parameters
   _planning_cycle_time = planner_config["planning_cycle_time"].as<double>();
   _checking_time_ratio = planner_config["checking_time_ratio"].as<double>();

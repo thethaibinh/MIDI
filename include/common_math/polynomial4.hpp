@@ -61,86 +61,184 @@ class FourthOrderPolynomial : public Polynomial {
   // solve quartic equation x^4 + a*x^3 + b*x^2 + c*x + d
   // Attention - this function returns dynamically allocated array. It has to be
   // released afterwards.
-  uint8_t solve_roots(std::vector<double>& roots) const override {
+  uint8_t solve_roots(std::vector<double> &roots) const override
+  {
     std::vector<double> _coeffs = get_coeffs();
-    if (_coeffs.size() != 5) {
+    if (_coeffs.size() != 5)
+    {
       throw std::invalid_argument(
-        "Quartic polynomials must have exactly 5 coefficients.");
+          "Quartic polynomials must have exactly 5 coefficients.");
     }
+
+    // Handle degenerate cases first
+    if (fabs(_coeffs[0]) < EPS)
+    {
+      // Reduce to cubic equation if leading coefficient is nearly zero
+      const std::vector<double> cubic_coeffs = {_coeffs[1], _coeffs[2], _coeffs[3], _coeffs[4]};
+      ThirdOrderPolynomial cubic(cubic_coeffs, get_start_time(), get_end_time());
+      return cubic.solve_roots(roots);
+    }
+
+    // Normalize coefficients
     double a = _coeffs[1] / _coeffs[0];
     double b = _coeffs[2] / _coeffs[0];
     double c = _coeffs[3] / _coeffs[0];
     double d = _coeffs[4] / _coeffs[0];
-    double a3 = -b;
-    double b3 = a * c - 4. * d;
-    double c3 = -a * a * d - c * c + 4. * b * d;
 
-    // initialise counters for real and imaginary roots
-    int rCnt = 0;
-    // cubic resolvent
-    // y^3 − b*y^2 + (ac−4d)*y − a^2*d−c^2+4*b*d = 0
-
-    std::vector<double> coeffs = {1, a3, b3, c3};
-    ThirdOrderPolynomial pol3(coeffs, get_start_time(), get_end_time());
-    std::vector<double> x3;
-    unsigned int iZeroes = pol3.solve_roots(x3);
-
-    double q1, q2, p1, p2, D, sqD, y;
-
-    y = x3[0];
-    // The essence - choosing Y with maximal absolute value.
-    if (iZeroes != 1) {
-      if (fabs(x3[1]) > fabs(y)) y = x3[1];
-      if (fabs(x3[2]) > fabs(y)) y = x3[2];
+    // Handle special case: biquadratic equation (x⁴ + px² + q = 0)
+    if (fabs(a) < EPS && fabs(c) < EPS)
+    {
+      return solve_biquadratic(b, d, roots);
     }
 
-    // h1+h2 = y && h1*h2 = d  <=>  h^2 -y*h + d = 0    (h === q)
+    // Cubic resolvent coefficients
+    double a2 = a * a;
+    double a3 = -b;
+    double b3 = a * c - 4.0 * d;
+    double c3 = -a2 * d - c * c + 4.0 * b * d;
 
-    D = y * y - 4 * d;
-    if (fabs(D) < eps)  // in other words - D==0
+    // Solve cubic resolvent
+    std::vector<double> resolvent_coeffs = {1.0, a3, b3, c3};
+    ThirdOrderPolynomial resolvent(resolvent_coeffs, -INFINITY, INFINITY);
+    std::vector<double> x3;
+    uint8_t iZeroes = resolvent.solve_roots(x3);
+
+    // Find y with maximum absolute value for better numerical stability
+    double y = x3[0];
+    if (iZeroes != 1)
     {
-      q1 = q2 = y * 0.5;
-      // g1+g2 = a && g1+g2 = b-y   <=>   g^2 - a*g + b-y = 0    (p === g)
-      D = a * a - 4 * (b - y);
-      if (fabs(D) < eps)  // in other words - D==0
-        p1 = p2 = a * 0.5;
+      if (fabs(x3[1]) > fabs(y))
+        y = x3[1];
+      if (fabs(x3[2]) > fabs(y))
+        y = x3[2];
+    }
 
-      else {
-        sqD = sqrt(D);
+    // Handle nearly equal roots case
+    double D = y * y - 4.0 * d;
+    double q1, q2, p1, p2;
+
+    if (fabs(D) < EPS)
+    {
+      // Case of repeated roots
+      q1 = q2 = y * 0.5;
+      D = a2 - 4.0 * (b - y);
+
+      if (fabs(D) < EPS)
+      {
+        // Four equal roots case
+        p1 = p2 = a * 0.5;
+      }
+      else
+      {
+        double sqD = sqrt(D);
         p1 = (a + sqD) * 0.5;
         p2 = (a - sqD) * 0.5;
       }
-    } else {
-      sqD = sqrt(D);
+    }
+    else
+    {
+      // Regular case
+      double sqD = sqrt(D);
       q1 = (y + sqD) * 0.5;
       q2 = (y - sqD) * 0.5;
-      // g1+g2 = a && g1*h2 + g2*h1 = c       ( && g === p )  Krammer
-      p1 = (a * q1 - c) / (q1 - q2);
-      p2 = (c - a * q2) / (q1 - q2);
+
+      // Handle division by small numbers
+      double denom = q1 - q2;
+      if (fabs(denom) < EPS)
+      {
+        // Alternative computation for nearly equal roots
+        p1 = p2 = a * 0.5;
+      }
+      else
+      {
+        p1 = (a * q1 - c) / denom;
+        p2 = (c - a * q2) / denom;
+      }
     }
 
+    return solve_quadratic_pair(p1, q1, p2, q2, roots);
+  }
 
-    // solving quadratic eq. - x^2 + p1*x + q1 = 0
-    D = p1 * p1 - 4 * q1;
-    if (!(D < 0.0)) {
-      // real roots filled from left
-      sqD = sqrt(D);
-      roots.push_back((-p1 + sqD) * 0.5);
-      ++rCnt;
-      roots.push_back((-p1 - sqD) * 0.5);
-      ++rCnt;
+private:
+  // Helper method for biquadratic case
+  uint8_t solve_biquadratic(const double &p, const double &q, std::vector<double> &roots) const
+  {
+    std::vector<double> quad_coeffs = {1.0, p, q};
+    SecondOrderPolynomial quad(quad_coeffs, -INFINITY, INFINITY);
+    std::vector<double> quad_roots;
+    uint8_t n = quad.solve_roots(quad_roots);
+
+    uint8_t num_roots = 0;
+    for (uint8_t i = 0; i < n; i++)
+    {
+      if (quad_roots[i] >= 0)
+      {
+        double sqrt_root = sqrt(quad_roots[i]);
+        if (sqrt_root >= get_start_time() && sqrt_root <= get_end_time())
+        {
+          roots.push_back(sqrt_root);
+          num_roots++;
+        }
+        if (-sqrt_root >= get_start_time() && -sqrt_root <= get_end_time())
+        {
+          roots.push_back(-sqrt_root);
+          num_roots++;
+        }
+      }
+    }
+    return num_roots;
+  }
+
+  // Helper method for solving the two quadratic equations
+  uint8_t solve_quadratic_pair(const double &p1, const double &q1,
+                               const double &p2, const double &q2,
+                               std::vector<double> &roots) const
+  {
+    std::vector<double> temp_roots;
+
+    // First quadratic: x² + p1x + q1 = 0
+    double D1 = p1 * p1 - 4.0 * q1;
+    if (D1 >= -EPS)
+    { // Allow slightly negative discriminant due to numerical errors
+      if (D1 < 0)
+        D1 = 0;
+      double sqD = sqrt(D1);
+      temp_roots.push_back((-p1 + sqD) * 0.5);
+      temp_roots.push_back((-p1 - sqD) * 0.5);
     }
 
-    // solving quadratic eq. - x^2 + p2*x + q2 = 0
-    D = p2 * p2 - 4 * q2;
-    if (!(D < 0.0)) {
-      sqD = sqrt(D);
-      roots.push_back((-p2 + sqD) * 0.5);
-      ++rCnt;
-      roots.push_back((-p2 - sqD) * 0.5);
-      ++rCnt;
+    // Second quadratic: x² + p2x + q2 = 0
+    double D2 = p2 * p2 - 4.0 * q2;
+    if (D2 >= -EPS)
+    {
+      if (D2 < 0)
+        D2 = 0;
+      double sqD = sqrt(D2);
+      temp_roots.push_back((-p2 + sqD) * 0.5);
+      temp_roots.push_back((-p2 - sqD) * 0.5);
     }
 
-    return rCnt;
+    // Filter roots within bounds and handle duplicates
+    for (const double &root : temp_roots)
+    {
+      if (root >= get_start_time() && root <= get_end_time())
+      {
+        // Check if this root is already in the results (within epsilon)
+        bool is_duplicate = false;
+        for (const double &existing_root : roots)
+        {
+          if (fabs(root - existing_root) < EPS)
+          {
+            is_duplicate = true;
+            break;
+          }
+        }
+        if (!is_duplicate)
+        {
+          roots.push_back(root);
+        }
+      }
+    }
+    return roots.size();
   }
 };

@@ -154,7 +154,7 @@ class PlannerNode {
   void start_callback(const std_msgs::Empty::ConstPtr& msg);
   void reset_callback(const std_msgs::Empty::ConstPtr& msg);
   void state_callback(const dodgeros_msgs::QuadState& state);
-  void img_callback(const sensor_msgs::ImageConstPtr& depth_msg);
+  void plan(const sensor_msgs::ImageConstPtr& depth_msg);
   void visualise(const sensor_msgs::ImageConstPtr& depth_msg);
   void odometry_callback(const nav_msgs::OdometryConstPtr& odom_msg);
   // Ardupilot state callbacks
@@ -190,8 +190,8 @@ class PlannerNode {
   MavrosControlModes _mavros_control_mode;
   double _trajectory_discretisation_cycle, _planning_cycle_time, _2d_z_margin, _replan_factor;
   uint8_t _spiral_sampling_step;
-  bool _visualise, _3d_planning, _debug_num_trajectories, _is_spiral_sampling;
-  std::vector<double> _depth_uncertainty_coeffs;
+  bool _visualise, _3d_planning, _debug_num_trajectories, _is_spiral_sampling, _is_dynamic_planning;
+  std::vector<double> _depth_uncertainty_coeffs, _dynamic_pos_cov_coeffs;
   double _depth_upper_bound, _depth_lower_bound, _checking_time_ratio, _depth_sampling_margin;
   double _go_to_goal_threshold, _goal_north_coordinate, _goal_west_coordinate, _goal_up_coordinate;
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;

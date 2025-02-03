@@ -68,9 +68,16 @@ class ThirdOrderPolynomial : public Polynomial {
   //         1 real root : x[0], x[1] ± i*x[2], return 1
   uint8_t solve_roots(std::vector<double>& roots) const override {
     std::vector<double> _coeffs = get_coeffs();
-    if (_coeffs[0] == 0 || _coeffs.size() != 4) {
+    if (_coeffs.size() != 4) {
       throw std::invalid_argument(
         "solve_roots: Cubic polynomial must have exactly 4 coefficients.");
+    }
+    // Handle degenerate cases first
+    if(fabs(_coeffs[0]) < EPS) {
+      // Reduce to cubic equation if leading coefficient is nearly zero
+      const std::vector<double> cubic_coeffs = {_coeffs[1], _coeffs[2], _coeffs[3]};
+      SecondOrderPolynomial cubic(cubic_coeffs, get_start_time(), get_end_time());
+      return cubic.solve_roots(roots);
     }
     double a = _coeffs[1] / _coeffs[0];
     double b = _coeffs[2] / _coeffs[0];
@@ -119,7 +126,7 @@ class ThirdOrderPolynomial : public Polynomial {
       roots.push_back(-0.5 * (A + B) - a);
       roots.push_back(0.5 * sqrt(3.) * (A - B));
       uint8_t num_roots = 3;
-      if (fabs(roots.back()) < eps) {
+      if (fabs(roots.back()) < EPS) {
         roots.pop_back();
         num_roots--;
         if ((roots.back() < get_start_time()) || (roots.back() > get_end_time())) {

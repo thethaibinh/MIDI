@@ -23,7 +23,7 @@ PlannerNode::PlannerNode()
   control_command_pub_ = n_.advertise<dodgeros_msgs::Command>("/kingfisher/dodgeros_pilot/feedthrough_command", 1);
   point_cloud_pub = n_.advertise<sm::PointCloud2>("/cloud_out", 1);
   visual_pub = n_.advertise<visualization_msgs::Marker>("/visualization", 1);
-  image_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::img_callback, this);
+  image_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::plan, this);
   if (_visualise) {
     visual_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::visualise, this);
   }
@@ -586,7 +586,7 @@ bool PlannerNode::check_valid_trajectory(
 }
 
 // Callback for planning when a new depth image comes
-void PlannerNode::img_callback(const sensor_msgs::ImageConstPtr& depth_msg) {
+void PlannerNode::plan(const sensor_msgs::ImageConstPtr& depth_msg) {
 
   if (_planner_state != PlanningStates::TRAJECTORY_CONTROL)
     return;
@@ -683,7 +683,7 @@ void PlannerNode::img_callback(const sensor_msgs::ImageConstPtr& depth_msg) {
   }
 
   PinholeCamera camera(fy, cx, cy, depth_mat.cols, depth_mat.rows,
-                       _depth_uncertainty_coeffs, _true_vehicle_radius,
+                       _depth_uncertainty_coeffs, _dynamic_pos_cov_coeffs, _true_vehicle_radius,
                        _planning_vehicle_radius, _minimum_clear_distance);
 
   // Pass the projected_goal to the RandomTrajectorySampler

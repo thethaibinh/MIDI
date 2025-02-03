@@ -90,6 +90,17 @@ class SecondOrderSegment : public Segment {
     return get_point(get_end_time());
   }
 
+  uint8_t solve_first_time_at_depth(const double depth, double& time) const {
+    std::vector<Eigen::Vector3d> coeffs = get_coeffs();
+    std::vector<double> z_coeffs = {coeffs[0].z(), coeffs[1].z(), coeffs[2].z() - depth};
+
+    const SecondOrderPolynomial pol2(z_coeffs, get_start_time(), get_end_time());
+    std::vector<double> times;
+    const uint8_t num_roots = pol2.solve_roots(times);
+    time = times[0];
+    return num_roots;
+  }
+
   //! Returns the position of the polynomial along the given axis at a given
   //! time.
   /*!
@@ -154,29 +165,31 @@ class SecondOrderSegment : public Segment {
       b1 * (c1 - pixel.x()) * 2.0 + b2 * (c2 - pixel.y()) * 2.0 + b3 * (c3 - pixel.z()) * 2.0,
       (c1 - pixel.x()) * (c1 - pixel.x()) + (c2 - pixel.y()) * (c2 - pixel.y()) + (c3 - pixel.z()) * (c3 - pixel.z())};
 
-    if (eu_dist_coeffs[0] != 0) {
-      FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
-      return pol4.get_min();
-    } else if (eu_dist_coeffs[1] != 0) {
-      eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-      ThirdOrderPolynomial pol3(eu_dist_coeffs, get_start_time(), get_end_time());
-      return pol3.get_min();
-    } else {
-      eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-      eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-      SecondOrderPolynomial pol2(eu_dist_coeffs, get_start_time(), get_end_time());
-      return pol2.get_min();
-    }
+    FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
+    return pol4.get_min();
+    // if (eu_dist_coeffs[0] != 0) {
+    //   FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol4.get_min();
+    // } else if (eu_dist_coeffs[1] != 0) {
+    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
+    //   ThirdOrderPolynomial pol3(eu_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol3.get_min();
+    // } else {
+    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
+    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
+    //   SecondOrderPolynomial pol2(eu_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol2.get_min();
+    // }
   }
 
   double get_mahalanobis_distance(const Eigen::Vector3d& mean,
                                   const Eigen::Vector3d& cov_diag) const {
-    const double hmds = get_half_mahalanobis_distance_square(mean, cov_diag);
-    return sqrt(hmds * 2);
+    const double mds = get_du_mds(mean, cov_diag);
+    return sqrt(mds);
   }
 
-  // Function to calculate Mahalanobis distance
-  double get_half_mahalanobis_distance_square(const Eigen::Vector3d& mean,
+  // Function to calculate a half of the Mahalanobis distance square for dynamic uncertainty
+  double get_du_mds(const Eigen::Vector3d& mean,
                                   const Eigen::Vector3d& cov_diag) const {
     std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
     double a1 = _coeffs[0][0], b1 = _coeffs[1][0], c1 = _coeffs[2][0];
@@ -185,52 +198,114 @@ class SecondOrderSegment : public Segment {
 
     std::vector<double> ma_dist_coeffs = {
       // A fourth orders polynomial from PDF expanded equation in the paper
-        a1 * a1 / cov_diag.x() / 2.0 +
-        a2 * a2 / cov_diag.y() / 2.0 +
-        a3 * a3 / cov_diag.z() / 2.0,
-        a1 * b1 / cov_diag.x() +
-        a2 * b2 / cov_diag.y() +
-        a3 * b3 / cov_diag.z(),
-        (b1 * b1 + 2.0 * a1 * (c1 - mean.x())) / cov_diag.x() / 2.0 +
-        (b2 * b2 + 2.0 * a2 * (c2 - mean.y())) / cov_diag.y() / 2.0 +
-        (b3 * b3 + 2.0 * a3 * (c3 - mean.z())) / cov_diag.z() / 2.0,
-        b1 * (c1 - mean.x()) / cov_diag.x() +
-        b2 * (c2 - mean.y()) / cov_diag.y() +
-        b3 * (c3 - mean.z()) / cov_diag.z(),
-        (c1 - mean.x()) * (c1 - mean.x()) / cov_diag.x() / 2.0 +
-        (c2 - mean.y()) * (c2 - mean.y()) / cov_diag.y() / 2.0 +
-        (c3 - mean.z()) * (c3 - mean.z()) / cov_diag.z() / 2.0};
+        a1 * a1 / cov_diag.x() +
+        a2 * a2 / cov_diag.y() +
+        a3 * a3 / cov_diag.z(),
+        a1 * b1 / cov_diag.x() * 2.0 +
+        a2 * b2 / cov_diag.y() * 2.0 +
+        a3 * b3 / cov_diag.z() * 2.0,
+        (b1 * b1 + 2.0 * a1 * (c1 - mean.x())) / cov_diag.x() +
+        (b2 * b2 + 2.0 * a2 * (c2 - mean.y())) / cov_diag.y() +
+        (b3 * b3 + 2.0 * a3 * (c3 - mean.z())) / cov_diag.z(),
+        b1 * (c1 - mean.x()) / cov_diag.x() * 2.0 +
+        b2 * (c2 - mean.y()) / cov_diag.y() * 2.0 +
+        b3 * (c3 - mean.z()) / cov_diag.z() * 2.0,
+        (c1 - mean.x()) * (c1 - mean.x()) / cov_diag.x() +
+        (c2 - mean.y()) * (c2 - mean.y()) / cov_diag.y() +
+        (c3 - mean.z()) * (c3 - mean.z()) / cov_diag.z()};
 
-    if (ma_dist_coeffs[0] != 0) {
-      FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
-      return pol4.get_min();
-    } else if (ma_dist_coeffs[1] != 0) {
-      ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-      ThirdOrderPolynomial pol3(ma_dist_coeffs, get_start_time(), get_end_time());
-      return pol3.get_min();
-    } else {
-      ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-      ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-      SecondOrderPolynomial pol2(ma_dist_coeffs, get_start_time(), get_end_time());
-      return pol2.get_min();
-    }
+    FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
+    return pol4.get_min();
+    // if (ma_dist_coeffs[0] != 0) {
+    //   FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol4.get_min();
+    // } else if (ma_dist_coeffs[1] != 0) {
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   ThirdOrderPolynomial pol3(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol3.get_min();
+    // } else {
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   SecondOrderPolynomial pol2(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol2.get_min();
+    // }
+  }
+
+  // Function to calculate a half of the Mahalanobis distance square for dynamic uncertainty
+  double get_dy_mds(const Eigen::Vector3d& velocity,
+                                  const Eigen::Vector3d& cov_diag) const {
+    std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
+    double a1 = _coeffs[0][0], b1 = _coeffs[1][0], c1 = _coeffs[2][0];
+    double a2 = _coeffs[0][1], b2 = _coeffs[1][1], c2 = _coeffs[2][1];
+    double a3 = _coeffs[0][2], b3 = _coeffs[1][2], c3 = _coeffs[2][2];
+    double vx = velocity.x(), vy = velocity.y(), vz = velocity.z();
+    std::vector<double> ma_dist_coeffs = {
+        // A fourth orders polynomial from PDF expanded equation in the paper
+        (a1 * a1) / cov_diag.x() +
+        (a2 * a2) / cov_diag.y() +
+        (a3 * a3) / cov_diag.z(),
+        a1 / cov_diag.x() * (b1 - vx) * 2.0 +
+        a2 / cov_diag.y() * (b2 - vy) * 2.0 +
+        a3 / cov_diag.z() * (b3 - vz) * 2.0,
+        (a1 * c1 * 2.0 + (b1 - vx) * (b1 - vx)) / cov_diag.x() +
+        (a2 * c2 * 2.0 + (b2 - vy) * (b2 - vy)) / cov_diag.y() +
+        (a3 * c3 * 2.0 + (b3 - vz) * (b3 - vz)) / cov_diag.z(),
+        c1 / cov_diag.x() * (b1 - vx) * 2.0 +
+        c2 / cov_diag.y() * (b2 - vy) * 2.0 +
+        c3 / cov_diag.z() * (b3 - vz) * 2.0,
+        (c1 * c1) / cov_diag.x() +
+        (c2 * c2) / cov_diag.y() +
+        (c3 * c3) / cov_diag.z()};
+
+    FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
+    return pol4.get_min();
+    // if (ma_dist_coeffs[0] != 0) {
+    //   FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol4.get_min();
+    // } else if (ma_dist_coeffs[1] != 0) {
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   ThirdOrderPolynomial pol3(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol3.get_min();
+    // } else {
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
+    //   SecondOrderPolynomial pol2(ma_dist_coeffs, get_start_time(), get_end_time());
+    //   return pol2.get_min();
+    // }
   }
 
   // Function to calculate joint PDF for three independent normal variables
-  double get_collision_probability(const Eigen::Vector3d& mean,
+  double get_du_collision_probability(const Eigen::Vector3d& mean,
                                    const PinholeCamera& camera,
                                    double& mahalanobis_distance) const {
     // Calculate the diagonal of the covariance matrix
-    const Eigen::Vector3d cov_diag = camera.get_covariance_matrix(mean);
+    const Eigen::Vector3d cov_diag = camera.get_depth_noise_covariance_matrix(mean);
 
     // Calculate the Mahalanobis distance
-    const double hmds = get_half_mahalanobis_distance_square(mean, cov_diag);
-    mahalanobis_distance = std::min(mahalanobis_distance, sqrt(hmds * 2));
+    const double mds = get_du_mds(mean, cov_diag);
+    mahalanobis_distance = std::min(mahalanobis_distance, sqrt(mds));
 
 
     // Calculate the denominator constant (2π)^(3/2) * sigma_x * sigma_y * sigma_z
     double denominator = pow(2 * M_PI, 1.5) * sqrt(cov_diag.x() * cov_diag.y() * cov_diag.z());
-    return exp(-hmds) / denominator;
+    return exp(-mds / 2) / denominator;
+  }
+
+  // Function to calculate joint PDF for three independent normal variables
+  double get_dy_collision_probability(const Eigen::Vector3d& velocity,
+                                   const PinholeCamera& camera,
+                                   double& mahalanobis_distance) const {
+    // Calculate the diagonal of the covariance matrix for dynamic position uncertainty
+    const Eigen::Vector3d cov_diag = camera.get_dynamic_pos_covariance_matrix();
+
+    // Calculate the Mahalanobis distance
+    const double mds = get_dy_mds(velocity, cov_diag);
+    mahalanobis_distance = std::min(mahalanobis_distance, sqrt(mds));
+
+
+    // Calculate the denominator constant (2π)^(3/2) * sigma_x * sigma_y * sigma_z
+    double denominator = pow(2 * M_PI, 1.5) * sqrt(cov_diag.x() * cov_diag.y() * cov_diag.z());
+    return exp(-mds / 2) / denominator;
   }
 
   void get_depth_switching_points(std::vector<double>& roots) const override {
@@ -252,18 +327,6 @@ class SecondOrderSegment : public Segment {
    */
   std::vector<Eigen::Vector3d> get_derivative_coeffs() const override {
     std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
-
-    // std::stringstream ss;
-    // ss << "Vector get_coeffs Z: [";
-    // for (uint8_t i = 0; i < _coeffs.size(); ++i) {
-    //   ss << _coeffs[i][2];
-    //   if (i != _coeffs.size() - 1) {
-    //     ss << ", ";
-    //   }
-    // }
-    // ss << "]";
-    // ROS_WARN("%s", ss.str().c_str());
-
     std::vector<Eigen::Vector3d> deriv_coeffs;
     deriv_coeffs.reserve(2);
     for (int i = 0; i < 2; i++) {
@@ -333,8 +396,11 @@ class SecondOrderSegment : public Segment {
     int16_t max_projected_x = static_cast<int16_t>(*std::max_element(projected_adding_margin_x_coords.begin(), projected_adding_margin_x_coords.end()));
     int16_t min_projected_y = static_cast<int16_t>(*std::min_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
     int16_t max_projected_y = static_cast<int16_t>(*std::max_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
-    std::vector<int16_t> projection_boundary = {min_projected_x, min_projected_y, max_projected_x, max_projected_y};
-    return projection_boundary;
+    min_projected_x = std::clamp(min_projected_x, static_cast<int16_t>(0), static_cast<int16_t>(camera.get_width()));
+    min_projected_y = std::clamp(min_projected_y, static_cast<int16_t>(0), static_cast<int16_t>(camera.get_height()));
+    max_projected_x = std::clamp(max_projected_x, static_cast<int16_t>(0), static_cast<int16_t>(camera.get_width()));
+    max_projected_y = std::clamp(max_projected_y, static_cast<int16_t>(0), static_cast<int16_t>(camera.get_height()));
+    return {min_projected_x, min_projected_y, max_projected_x, max_projected_y};
   }
 
   //! Returns the i-th 3D vector of coefficients.
