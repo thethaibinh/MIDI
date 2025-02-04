@@ -9,6 +9,7 @@ vehicle_frame_name: "base_link"
 # Planning parameters
 topics:
   depth: "/d435/depth/image_rect_raw"
+  scene_flow: "/scene_flow/depth_velocity"
 goal_coordinate: # World coordinates in meters
   north: 5.6
   west: 0.0

@@ -50,6 +50,7 @@ bool PlannerNode::loadParameters() {
   _vehicle_frame = planner_config["vehicle_frame_name"].as<std::string>();
   // topics
   _depth_topic = planner_config["topics"]["depth"].as<std::string>();
+  _scene_flow_topic = planner_config["topics"]["scene_flow"].as<std::string>();
   // Goal coordinates
   // For MAVROS ENU, record goal coordinates once taken off due to the takeoff
   // place is not the origin (0,0,0)

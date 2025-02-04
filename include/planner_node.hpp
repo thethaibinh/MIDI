@@ -110,14 +110,14 @@ class PlannerNode {
 
  private:
   // Member variables and private functions
-  std::string _vehicle_frame, _world_frame, _depth_topic;
+  std::string _vehicle_frame, _world_frame, _depth_topic, _scene_flow_topic;
   tf2_ros::Buffer to_world_buffer, to_vehicle_buffer;
   tf2_ros::TransformListener to_world_tf2, to_vehicle_tf2;
   ros::NodeHandle n_;
   ros::NodeHandle pnh_;
   ros::Publisher trajectoty_pub, point_cloud_pub, visual_pub,
     control_command_pub_, raw_ref_pos_pub, att_ctrl_pub;
-  ros::Subscriber reset_sub, start_sub, image_sub, state_sub, visual_sub,
+  ros::Subscriber reset_sub, start_sub, image_sub, scene_flow_sub, state_sub, visual_sub,
     odom_sub, mav_state_sub, mav_pose_sub, mav_twist_sub, mav_accel_sub;
   ros::ServiceClient takeoff_srv, land_srv, mode_srv;
   ros::Timer statusloop_timer_, control_loop_timer_;
@@ -168,6 +168,7 @@ class PlannerNode {
     const dodgeros_msgs::QuadState& _state);
   Eigen::Vector3d array3d_to_eigen3d(const std::array<double, 3>& arr);
   cv::Mat preprocess_depth_image(const sm::ImageConstPtr& depth_msg);
+  cv::Mat preprocess_scene_flow_image(const sm::ImageConstPtr& scene_flow_msg);
   void control_loop(const ros::TimerEvent &event);
   void update_reference_trajectory();
   void track_trajectory();

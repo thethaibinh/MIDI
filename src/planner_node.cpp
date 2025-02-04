@@ -23,9 +23,10 @@ PlannerNode::PlannerNode()
   control_command_pub_ = n_.advertise<dodgeros_msgs::Command>("/kingfisher/dodgeros_pilot/feedthrough_command", 1);
   point_cloud_pub = n_.advertise<sm::PointCloud2>("/cloud_out", 1);
   visual_pub = n_.advertise<visualization_msgs::Marker>("/visualization", 1);
-  image_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::plan, this);
+  // image_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::plan, this);
+  scene_flow_sub = n_.subscribe(_scene_flow_topic, 1, &PlannerNode::plan, this);
   if (_visualise) {
-    visual_sub = n_.subscribe(_depth_topic, 1, &PlannerNode::visualise, this);
+    visual_sub = n_.subscribe(_scene_flow_topic, 1, &PlannerNode::visualise, this);
   }
   start_sub = n_.subscribe("/kingfisher/start_navigation", 1,
                                    &PlannerNode::start_callback, this);
@@ -59,9 +60,21 @@ cv::Mat PlannerNode::preprocess_depth_image (const sm::ImageConstPtr& depth_msg)
   return depth_mat;
 }
 
-pointcloud_type* PlannerNode::create_point_cloud (const sm::ImageConstPtr& depth_msg)
+cv::Mat PlannerNode::preprocess_scene_flow_image (const sm::ImageConstPtr& scene_flow_msg) {
+  cv_bridge::CvImageConstPtr cv_img_ptr = cv_bridge::toCvShare(scene_flow_msg, scene_flow_msg->encoding);
+  cv::Mat scene_flow_mat;
+  cv_img_ptr->image.convertTo(scene_flow_mat, CV_32FC4, _depth_scale);
+  return scene_flow_mat;
+}
+
+pointcloud_type* PlannerNode::create_point_cloud (const sm::ImageConstPtr& scene_flow_msg)
 {
-  cv::Mat depth_mat = preprocess_depth_image(depth_msg);
+  cv::Mat scene_flow_mat = preprocess_scene_flow_image(scene_flow_msg);
+  // Extract channels
+  std::vector<cv::Mat> channels(4);
+  cv::split(scene_flow_mat, channels);
+  cv::Mat& depth_mat = channels[0];        // Current depth
+
   double fy, fx, cx, cy;
   if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
     cx = depth_mat.cols / 2.0f;
@@ -75,7 +88,7 @@ pointcloud_type* PlannerNode::create_point_cloud (const sm::ImageConstPtr& depth
   }
 
   pointcloud_type* cloud (new pointcloud_type());
-  cloud->header.stamp     = depth_msg->header.stamp.toNSec() / 1000;
+  cloud->header.stamp     = scene_flow_msg->header.stamp.toNSec() / 1000;
   cloud->header.frame_id  = _vehicle_frame;
   cloud->is_dense         = false; //single point of view, 2d rasterized
   cloud->height = depth_mat.rows;
@@ -586,7 +599,7 @@ bool PlannerNode::check_valid_trajectory(
 }
 
 // Callback for planning when a new depth image comes
-void PlannerNode::plan(const sensor_msgs::ImageConstPtr& depth_msg) {
+void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
 
   if (_planner_state != PlanningStates::TRAJECTORY_CONTROL)
     return;
@@ -669,7 +682,15 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& depth_msg) {
                                      goal_in_camera_frame.point.y,
                                      goal_in_camera_frame.point.z);
 
-  cv::Mat depth_mat = preprocess_depth_image(depth_msg);
+  cv::Mat scene_flow_mat = preprocess_scene_flow_image(scene_flow_msg);
+  // Extract channels
+  std::vector<cv::Mat> channels(4);
+  cv::split(scene_flow_mat, channels);
+  cv::Mat& depth_mat = channels[0];        // Current depth
+  cv::Mat& flow_x = channels[1];       // Optical flow x
+  cv::Mat& flow_y = channels[2];       // Optical flow y
+  cv::Mat& depth_change = channels[3]; // Depth change ratio
+
   double cx, cy, fy;
   // Camera model initialization
   if (_runtime_mode == RuntimeModes::FLIGHTMARE) {

@@ -211,6 +211,8 @@ class DuPlanner {
   //! Pointer to the array where the depth image is stored
   const float* _depth_data;
 
+  const std::vector<Eigen::Vector3d> _scene_flow_data;
+
   //! Pinhole camera model
   PinholeCamera _camera;
 
