@@ -300,7 +300,9 @@ void PlannerNode::update_reference_trajectory() {
       asign_reference_trajectory(wall_time_now);
       had_reference_trajectory = true;
     }
-    if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
+    if (_is_periodic_replanning && point_time > _replanning_interval) {
+      asign_reference_trajectory(wall_time_now);
+    } else if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
       asign_reference_trajectory(wall_time_now);
     }
     trajectory_queue_.pop_front();

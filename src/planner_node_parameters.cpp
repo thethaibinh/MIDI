@@ -102,6 +102,8 @@ bool PlannerNode::loadParameters() {
     _traveling_cost = TravelingCost::DISTANCE;
   }
   _replan_factor = planner_config["replan_factor"].as<double>();
+  _is_periodic_replanning = planner_config["is_periodic_replanning"].as<bool>();
+  _replanning_interval = planner_config["replanning_interval"].as<double>();
   _debug_num_trajectories = planner_config["debug_num_trajectories"].as<bool>();
   _collision_probability_threshold = planner_config["collision_probability_threshold"].as<double>();
   _sampled_trajectories_threshold = planner_config["sampled_trajectories_threshold"].as<uint32_t>();

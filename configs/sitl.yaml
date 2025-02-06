@@ -43,6 +43,8 @@ checked_trajectories_threshold: 100
 2d_z_margin: 0.1
 traveling_cost: "direction" # "direction" or "distance"
 replan_factor: 3.0
+is_periodic_replanning: no
+replanning_interval: 0.2
 debug_num_trajectories: yes
 openmp_chunk_size: 16
 
