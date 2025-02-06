@@ -300,10 +300,14 @@ static void run_trajectory_coverage_benchmark(
       RandomTrajectorySampler trajectory_sampler(
         camera, 3.0, 1.5, exploration_direction, 0.3, body_to_world,
         goal_in_world_frame, "world", true, 0.5, false, 1);
+      cv::Mat pixel_vx, pixel_vy, pixel_vz;
+      pixel_vx = cv::Mat::zeros(depth_mat.size(), CV_32FC1);
+      pixel_vy = cv::Mat::zeros(depth_mat.size(), CV_32FC1);
+      pixel_vz = cv::Mat::zeros(depth_mat.size(), CV_32FC1);
 
-      DuPlanner planner1(depth_mat, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
-      DuPlanner planner2(depth_mat, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
-      DuPlanner planner3(depth_mat, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
+      DuPlanner planner1(depth_mat, pixel_vx, pixel_vy, pixel_vz, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
+      DuPlanner planner2(depth_mat, pixel_vx, pixel_vy, pixel_vz, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
+      DuPlanner planner3(depth_mat, pixel_vx, pixel_vy, pixel_vz, camera, CollisionCheckingMethod::MIDI, 0.5, 10000, 150, false, 10, 16);
 
       double vx = random_vx(state_rdgen);
       double vy = random_vy(state_rdgen);

@@ -22,7 +22,7 @@ using namespace std::chrono;
 using namespace common_math;
 using namespace depth_uncertainty_planner;
 
-DuPlanner::DuPlanner(const cv::Mat& depthImage, const PinholeCamera& camera,
+DuPlanner::DuPlanner(const cv::Mat& depthImage, const cv::Mat& vx, const cv::Mat& vy, const cv::Mat& vz, const PinholeCamera& camera,
                      const CollisionCheckingMethod& collision_checking_method,
                      const double& checking_time_ratio,
                      const uint32_t& sampled_trajectories_threshold,
@@ -59,6 +59,9 @@ DuPlanner::DuPlanner(const cv::Mat& depthImage, const PinholeCamera& camera,
     max_collision_probability(0.0),
     collision_checking_method(collision_checking_method) {
   _depth_data = reinterpret_cast<const float*>(depthImage.data);
+  _vx_data = reinterpret_cast<const float*>(vx.data);
+  _vy_data = reinterpret_cast<const float*>(vy.data);
+  _vz_data = reinterpret_cast<const float*>(vz.data);
 }
 
 bool DuPlanner::find_lowest_cost_trajectory(
@@ -139,7 +142,7 @@ bool DuPlanner::find_lowest_cost_trajectory(
           is_collision_free = false;
           break;
         }
-        is_collision_free &= is_segment2_collision_free(second_order_segment, trajectory_collision_probability, mahalanobis_distance);
+        is_collision_free &= is_segment2_collision_free(initial_state, second_order_segment, trajectory_collision_probability, mahalanobis_distance);
       } else if (const auto* third_order_segment = dynamic_cast<const common_math::ThirdOrderSegment*>(segments[i])) {
         is_collision_free &= is_segment3_collision_free(third_order_segment);
       } else {
@@ -297,7 +300,7 @@ std::vector<Segment*> DuPlanner::get_segments(
   return segments;
 }
 
-bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_segment, double& trajectory_collision_probability, double& mahalanobis_distance) {
+bool DuPlanner::is_segment2_collision_free(const ruckig::InputParameter<3>& initial_state, const SecondOrderSegment* original_segment, double& trajectory_collision_probability, double& mahalanobis_distance) {
   PinholeCamera camera = _camera;
   // Skip if the segment is too short
   if (original_segment->get_duration() <= 1e-6) return true;
@@ -357,7 +360,7 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
       // Skip pixels with depth smaller than the true vehicle radius
       if (spatial_z < true_vehicle_radius) continue;
       // Skip pixels with depth greater than checking_depth + 1 meter
-      if (spatial_z > (checking_depth + 1)) continue;
+      if (spatial_z > (checking_depth + 2)) continue;
 
       const Eigen::Vector3d depth_point = camera.deproject_pixel_to_point(x, y, spatial_z);
 
@@ -369,27 +372,57 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
         continue;
       }
 
-      // Skip collision checking for pixels with depth greater than checking_depth
+      // Get the velocity of the camera
+      const double vx_cam = initial_state.current_velocity[0];
+      const double vy_cam = initial_state.current_velocity[1];
+      const double vz_cam = initial_state.current_velocity[2];
+      // Camera motion induced flow
+      const double induced_flow_x = (camera.get_fx() * vx_cam - (x - camera.get_cx()) * vz_cam) / spatial_z;
+      const double induced_flow_y = (camera.get_fy() * vy_cam - (y - camera.get_cy()) * vz_cam) / spatial_z;
+      const double vx = _vx_data[y * img_width + x] - induced_flow_x;
+      const double vy = _vy_data[y * img_width + x] - induced_flow_y;
+      const double vz = _vz_data[y * img_width + x] - vz_cam;
+      // Collision checking for pixels with depth greater than checking_depth and less than checking_depth + 2
       if (spatial_z > checking_depth) {
-        double prob = segment.get_du_collision_probability(depth_point, camera, mahalanobis_distance);
+        // Skip collision checking if this pixel is far away and moving away from the camera
+        if (vz < -3.0) continue;
+        // Otherwise, check if the dynamic pixel collides with the vehicle
+        if (segment.get_dynamic_euclidean_distance(depth_point, vx, vy, vz) < planning_vehicle_radius) {
+          collision_detected.store(true, std::memory_order_relaxed);
+          continue;
+        }
+        // If it is collision free, compute the collision probability for the dynamic pixel
+        double prob = segment.get_dynamic_collision_probability(depth_point, vx, vy, vz, camera, mahalanobis_distance);
         segment_collision_probability = std::max(segment_collision_probability, prob);
         if (prob > _collision_probability_threshold) {
           collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store
+          continue;
         }
+        // We're done with this pixel
         continue;
       }
 
       // Check for collision and compute probability for all remaining pixels
       // (with minimum_clear_distance <= spatial_z <= checking_depth)
+      // Check if the static pixel collides with the vehicle
       if (segment.get_euclidean_distance(depth_point) < planning_vehicle_radius) {
         collision_detected.store(true, std::memory_order_relaxed);
         continue;
       }
-      double prob = segment.get_du_collision_probability(depth_point, camera, mahalanobis_distance);
+      // Skip collision checking for pixels moving away very fast from the camera
+      if (vz < -5.0) continue;
+      // Otherwise, check if the dynamic pixel collides with the vehicle
+      if (segment.get_dynamic_euclidean_distance(depth_point, vx, vy, vz) < planning_vehicle_radius) {
+        collision_detected.store(true, std::memory_order_relaxed);
+        continue;
+      }
+      // If it is collision free, compute the collision probability for the dynamic pixel
+      double prob = segment.get_dynamic_collision_probability(depth_point, vx, vy, vz, camera, mahalanobis_distance);
       segment_collision_probability = std::max(segment_collision_probability, prob);
       if (prob > _collision_probability_threshold) {
         collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store
       }
+      // We're done with this pixel
     }
   }
   if (collision_detected.load(std::memory_order_relaxed)) return false;

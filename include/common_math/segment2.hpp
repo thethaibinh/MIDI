@@ -142,6 +142,7 @@ class SecondOrderSegment : public Segment {
   double get_euclidean_distance(const Eigen::Vector3d& pixel) const {
     return sqrt(get_euclidean_distance_square(pixel));
   }
+
   // Function to calculate Euclidean distance to a depth pixel
   double get_euclidean_distance_square(const Eigen::Vector3d& pixel) const {
     // The closest point in the trajectory to pixels with depth greater
@@ -167,29 +168,42 @@ class SecondOrderSegment : public Segment {
 
     FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
     return pol4.get_min();
-    // if (eu_dist_coeffs[0] != 0) {
-    //   FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol4.get_min();
-    // } else if (eu_dist_coeffs[1] != 0) {
-    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-    //   ThirdOrderPolynomial pol3(eu_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol3.get_min();
-    // } else {
-    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-    //   eu_dist_coeffs.erase(eu_dist_coeffs.begin());
-    //   SecondOrderPolynomial pol2(eu_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol2.get_min();
-    // }
+  }
+
+  double get_dynamic_euclidean_distance(const Eigen::Vector3d& pixel, const double& vx, const double& vy, const double& vz) const {
+    return sqrt(get_dynamic_euclidean_distance_square(pixel, vx, vy, vz));
+  }
+
+  double get_dynamic_euclidean_distance_square(const Eigen::Vector3d& pixel, const double& vx, const double& vy, const double& vz) const {
+    std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
+    double a1 = _coeffs[0][0], b1 = _coeffs[1][0], c1 = _coeffs[2][0];
+    double a2 = _coeffs[0][1], b2 = _coeffs[1][1], c2 = _coeffs[2][1];
+    double a3 = _coeffs[0][2], b3 = _coeffs[1][2], c3 = _coeffs[2][2];
+
+    // Time-parameterized polynomial of Euclidean distance from a point to the trajectory
+    std::vector<double> eu_dist_coeffs = {
+      a1 * a1 + a2 * a2 + a3 * a3,
+      a1 * (b1 - vx) * 2.0 + a2 * (b2 - vy) * 2.0 + a3 * (b3 - vz) * 2.0,
+      a1 * (c1 - pixel.x()) * 2.0 +
+      a2 * (c2 - pixel.y()) * 2.0 +
+      a3 * (c3 - pixel.z()) * 2.0 +
+      (b1 - vx) * (b1 - vx) + (b2 - vy) * (b2 - vy) + (b3 - vz) * (b3 - vz),
+      (b1 - vx) * (c1 - pixel.x()) * 2.0 +
+      (b2 - vy) * (c2 - pixel.y()) * 2.0 +
+      (b3 - vz) * (c3 - pixel.z()) * 2.0,
+      (c1 - pixel.x()) * (c1 - pixel.x()) + (c2 - pixel.y()) * (c2 - pixel.y()) + (c3 - pixel.z()) * (c3 - pixel.z())};
+    FourthOrderPolynomial pol4(eu_dist_coeffs, get_start_time(), get_end_time());
+    return pol4.get_min();
   }
 
   double get_mahalanobis_distance(const Eigen::Vector3d& mean,
                                   const Eigen::Vector3d& cov_diag) const {
-    const double mds = get_du_mds(mean, cov_diag);
+    const double mds = get_mds(mean, cov_diag);
     return sqrt(mds);
   }
 
   // Function to calculate a half of the Mahalanobis distance square for dynamic uncertainty
-  double get_du_mds(const Eigen::Vector3d& mean,
+  double get_mds(const Eigen::Vector3d& mean,
                                   const Eigen::Vector3d& cov_diag) const {
     std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
     double a1 = _coeffs[0][0], b1 = _coeffs[1][0], c1 = _coeffs[2][0];
@@ -216,29 +230,18 @@ class SecondOrderSegment : public Segment {
 
     FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
     return pol4.get_min();
-    // if (ma_dist_coeffs[0] != 0) {
-    //   FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol4.get_min();
-    // } else if (ma_dist_coeffs[1] != 0) {
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   ThirdOrderPolynomial pol3(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol3.get_min();
-    // } else {
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   SecondOrderPolynomial pol2(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol2.get_min();
-    // }
   }
 
   // Function to calculate a half of the Mahalanobis distance square for dynamic uncertainty
-  double get_dy_mds(const Eigen::Vector3d& velocity,
-                                  const Eigen::Vector3d& cov_diag) const {
+  double get_dynamic_mds(const Eigen::Vector3d& initial_mean,
+                        const double& vx,
+                        const double& vy,
+                        const double& vz,
+                        const Eigen::Vector3d& cov_diag) const {
     std::vector<Eigen::Vector3d> _coeffs = get_coeffs();
     double a1 = _coeffs[0][0], b1 = _coeffs[1][0], c1 = _coeffs[2][0];
     double a2 = _coeffs[0][1], b2 = _coeffs[1][1], c2 = _coeffs[2][1];
     double a3 = _coeffs[0][2], b3 = _coeffs[1][2], c3 = _coeffs[2][2];
-    double vx = velocity.x(), vy = velocity.y(), vz = velocity.z();
     std::vector<double> ma_dist_coeffs = {
         // A fourth orders polynomial from PDF expanded equation in the paper
         (a1 * a1) / cov_diag.x() +
@@ -247,42 +250,30 @@ class SecondOrderSegment : public Segment {
         a1 / cov_diag.x() * (b1 - vx) * 2.0 +
         a2 / cov_diag.y() * (b2 - vy) * 2.0 +
         a3 / cov_diag.z() * (b3 - vz) * 2.0,
-        (a1 * c1 * 2.0 + (b1 - vx) * (b1 - vx)) / cov_diag.x() +
-        (a2 * c2 * 2.0 + (b2 - vy) * (b2 - vy)) / cov_diag.y() +
-        (a3 * c3 * 2.0 + (b3 - vz) * (b3 - vz)) / cov_diag.z(),
-        c1 / cov_diag.x() * (b1 - vx) * 2.0 +
-        c2 / cov_diag.y() * (b2 - vy) * 2.0 +
-        c3 / cov_diag.z() * (b3 - vz) * 2.0,
-        (c1 * c1) / cov_diag.x() +
-        (c2 * c2) / cov_diag.y() +
-        (c3 * c3) / cov_diag.z()};
+        (a1 * (c1 - initial_mean.x()) * 2.0 + (b1 - vx) * (b1 - vx)) / cov_diag.x() +
+        (a2 * (c2 - initial_mean.y()) * 2.0 + (b2 - vy) * (b2 - vy)) / cov_diag.y() +
+        (a3 * (c3 - initial_mean.z()) * 2.0 + (b3 - vz) * (b3 - vz)) / cov_diag.z(),
+        (c1 - initial_mean.x()) / cov_diag.x() * (b1 - vx) * 2.0 +
+        (c2 - initial_mean.y()) / cov_diag.y() * (b2 - vy) * 2.0 +
+        (c3 - initial_mean.z()) / cov_diag.z() * (b3 - vz) * 2.0,
+        (c1 - initial_mean.x()) * (c1 - initial_mean.x()) / cov_diag.x() +
+        (c2 - initial_mean.y()) * (c2 - initial_mean.y()) / cov_diag.y() +
+        (c3 - initial_mean.z()) * (c3 - initial_mean.z()) / cov_diag.z()};
 
     FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
     return pol4.get_min();
-    // if (ma_dist_coeffs[0] != 0) {
-    //   FourthOrderPolynomial pol4(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol4.get_min();
-    // } else if (ma_dist_coeffs[1] != 0) {
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   ThirdOrderPolynomial pol3(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol3.get_min();
-    // } else {
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   ma_dist_coeffs.erase(ma_dist_coeffs.begin());
-    //   SecondOrderPolynomial pol2(ma_dist_coeffs, get_start_time(), get_end_time());
-    //   return pol2.get_min();
-    // }
   }
 
   // Function to calculate joint PDF for three independent normal variables
-  double get_du_collision_probability(const Eigen::Vector3d& mean,
+  // This function is used to calculate the collision probability induced by depth noise for static pixels
+  double get_collision_probability(const Eigen::Vector3d& mean,
                                    const PinholeCamera& camera,
                                    double& mahalanobis_distance) const {
     // Calculate the diagonal of the covariance matrix
     const Eigen::Vector3d cov_diag = camera.get_depth_noise_covariance_matrix(mean);
 
     // Calculate the Mahalanobis distance
-    const double mds = get_du_mds(mean, cov_diag);
+    const double mds = get_mds(mean, cov_diag);
     mahalanobis_distance = std::min(mahalanobis_distance, sqrt(mds));
 
 
@@ -292,14 +283,19 @@ class SecondOrderSegment : public Segment {
   }
 
   // Function to calculate joint PDF for three independent normal variables
-  double get_dy_collision_probability(const Eigen::Vector3d& velocity,
-                                   const PinholeCamera& camera,
-                                   double& mahalanobis_distance) const {
+  // This function is used to calculate the collision probability for dynamic pixels
+  double get_dynamic_collision_probability(const Eigen::Vector3d &initial_mean,
+                                      const double &vx,
+                                      const double &vy,
+                                      const double &vz,
+                                      const PinholeCamera &camera,
+                                      double &mahalanobis_distance) const
+  {
     // Calculate the diagonal of the covariance matrix for dynamic position uncertainty
     const Eigen::Vector3d cov_diag = camera.get_dynamic_pos_covariance_matrix();
 
     // Calculate the Mahalanobis distance
-    const double mds = get_dy_mds(velocity, cov_diag);
+    const double mds = get_dynamic_mds(initial_mean, vx, vy, vz, cov_diag);
     mahalanobis_distance = std::min(mahalanobis_distance, sqrt(mds));
 
 

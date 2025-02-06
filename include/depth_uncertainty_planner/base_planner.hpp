@@ -61,45 +61,46 @@ class DuPlanner {
    * them to be labeled as in collision). This is used to enforce field of view constraints as well; we assume there is an
    * obstacle just outside of the field of view this distance away from the camera. [meters]
    */
-  DuPlanner(const cv::Mat& depthImage,
-                  const PinholeCamera& camera,
-                  const CollisionCheckingMethod& collision_checking_method,
-                  const double& checking_time_ratio,
-                  const uint32_t& sampled_trajectories_threshold,
-                  const uint32_t& checked_trajectories_threshold,
-                  const bool& debug_num_trajectories,
-                  const double& collision_probability_threshold,
-                  const uint32_t& openmp_chunk_size);
+   DuPlanner(const cv::Mat &depthImage, const cv::Mat &vx, const cv::Mat &vy, const cv::Mat &vz,
+             const PinholeCamera &camera,
+             const CollisionCheckingMethod &collision_checking_method,
+             const double &checking_time_ratio,
+             const uint32_t &sampled_trajectories_threshold,
+             const uint32_t &checked_trajectories_threshold,
+             const bool &debug_num_trajectories,
+             const double &collision_probability_threshold,
+             const uint32_t &openmp_chunk_size);
 
-  //! Finds the trajectory with the lowest user-provided cost using a user-provided
-  //! trajectory generator.
-  /*!
-   * @param opt_trajectory A trajectory that defines the state of the vehicle when the depth image was taken
-   * @param allocated_computation_time The planner will exit after this amount of time has passed [seconds]
-   * @param cost_function_definition_object This object must define the cost function to be used to evaluate
-   * each of the candidate trajectories. The member variables of this object can be used to evaluate the cost
-   * function (see ExplorationCost, for example).
-   * @param cost_function_wrapper This function is a wrapper that takes cost_function_definition_object
-   * and a candidate trajectory as arguments. It is used to call the cost function defined in cost_function_definition_object
-   * and return the result.
-   * @param trajectory_sampler This object must define a function that returns new candidate trajectories (see
-   * RandomTrajectorySampler, for example)
-   * @return True if a feasible trajectory was found, false otherwise. If a feasible trajectory was found,
-   * the argument trajectory will be updated to contain the lowest cost trajectory found.
-   */
-  bool find_lowest_cost_trajectory(
-    ruckig::InputParameter<3>& initial_state,
-    ruckig::Trajectory<3>& opt_trajectory,
-    RandomTrajectorySampler& trajectory_sampler,
-    double allocated_computation_time, void* cost_function_definition_object,
-    double (*cost_function_wrapper)(void* cost_function_definition_object,
-                                    Eigen::Vector3d& endpoint_vector));
+   //! Finds the trajectory with the lowest user-provided cost using a user-provided
+   //! trajectory generator.
+   /*!
+    * @param opt_trajectory A trajectory that defines the state of the vehicle when the depth image was taken
+    * @param allocated_computation_time The planner will exit after this amount of time has passed [seconds]
+    * @param cost_function_definition_object This object must define the cost function to be used to evaluate
+    * each of the candidate trajectories. The member variables of this object can be used to evaluate the cost
+    * function (see ExplorationCost, for example).
+    * @param cost_function_wrapper This function is a wrapper that takes cost_function_definition_object
+    * and a candidate trajectory as arguments. It is used to call the cost function defined in cost_function_definition_object
+    * and return the result.
+    * @param trajectory_sampler This object must define a function that returns new candidate trajectories (see
+    * RandomTrajectorySampler, for example)
+    * @return True if a feasible trajectory was found, false otherwise. If a feasible trajectory was found,
+    * the argument trajectory will be updated to contain the lowest cost trajectory found.
+    */
+   bool find_lowest_cost_trajectory(
+       ruckig::InputParameter<3> &initial_state,
+       ruckig::Trajectory<3> &opt_trajectory,
+       RandomTrajectorySampler &trajectory_sampler,
+       double allocated_computation_time, void *cost_function_definition_object,
+       double (*cost_function_wrapper)(void *cost_function_definition_object,
+                                       Eigen::Vector3d &endpoint_vector));
 
-  /*!
-   * @return the steering amount
-   */
-  float get_steering() {
-    return steering_direction;
+   /*!
+    * @return the steering amount
+    */
+   float get_steering()
+   {
+     return steering_direction;
   }
 
   /*!
@@ -160,7 +161,7 @@ class DuPlanner {
    */
   bool is_segment3_collision_free(const ThirdOrderSegment* segment);
 
-  bool is_segment2_collision_free(const SecondOrderSegment* segment, double& trajectory_collision_probability, double& mahalanobis_distance);
+  bool is_segment2_collision_free(const ruckig::InputParameter<3>& initial_state, const SecondOrderSegment* segment, double& trajectory_collision_probability, double& mahalanobis_distance);
 
   double segment_collision_cost(const Segment* segment);
 
@@ -210,8 +211,9 @@ class DuPlanner {
 
   //! Pointer to the array where the depth image is stored
   const float* _depth_data;
-
-  const std::vector<Eigen::Vector3d> _scene_flow_data;
+  const float* _vx_data;
+  const float* _vy_data;
+  const float* _vz_data;
 
   //! Pinhole camera model
   PinholeCamera _camera;

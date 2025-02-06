@@ -143,6 +143,8 @@ class PinholeCamera {
   double get_focal_length() const { return _focal_length; }
   double get_cx() const { return _cx; }
   double get_cy() const { return _cy; }
+  double get_fx() const { return _focal_length; }
+  double get_fy() const { return _focal_length; }
   double get_true_vehicle_radius() const { return _true_vehicle_radius; }
   double get_planning_vehicle_radius() const { return _planning_vehicle_radius; }
   uint16_t get_width() const { return _width; }

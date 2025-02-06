@@ -74,6 +74,45 @@ pointcloud_type* PlannerNode::create_point_cloud (const sm::ImageConstPtr& scene
   std::vector<cv::Mat> channels(4);
   cv::split(scene_flow_mat, channels);
   cv::Mat& depth_mat = channels[0];        // Current depth
+  // cv::Mat& vz = channels[3];     // Depth change ratio
+
+  // float max_depth_change = 0.0;
+  // float min_depth_change = 1.0;
+  // float mean_depth_change = 0.0;
+
+  // // Create histogram for vz values
+  // const int num_bins = 100;  // Adjust based on desired precision
+  // std::vector<int> histogram(num_bins, 0);
+  // float vz_range = 2.0f;  // Assuming vz ranges from -1 to 1, adjust if needed
+  // float bin_width = vz_range / num_bins;
+
+  // for (int y = 0; y < depth_mat.rows; y++) {
+  //   for (int x = 0; x < depth_mat.cols; x++) {
+  //     float vz_val = vz.at<float>(y, x);
+  //     max_depth_change = std::max(max_depth_change, vz_val);
+  //     min_depth_change = std::min(min_depth_change, vz_val);
+  //     mean_depth_change += vz_val;
+
+  //     // Add to histogram
+  //     int bin = static_cast<int>((vz_val + vz_range/2) / bin_width);
+  //     bin = std::clamp(bin, 0, num_bins-1);
+  //     histogram[bin]++;
+  //   }
+  // }
+  // mean_depth_change /= depth_mat.rows * depth_mat.cols;
+
+  // // Find mode (most frequent value)
+  // int max_count = 0;
+  // float mode_vz = 0.0f;
+  // for (int i = 0; i < num_bins; i++) {
+  //   if (histogram[i] > max_count) {
+  //     max_count = histogram[i];
+  //     mode_vz = (i * bin_width) - vz_range/2;  // Convert bin index back to vz value
+  //   }
+  // }
+
+  // ROS_WARN("Max vz: %f, Min vz: %f, Mean vz: %f, Mode vz: %f",
+  //          max_depth_change, min_depth_change, mean_depth_change, mode_vz);
 
   double fy, fx, cx, cy;
   if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
@@ -686,10 +725,10 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
   // Extract channels
   std::vector<cv::Mat> channels(4);
   cv::split(scene_flow_mat, channels);
-  cv::Mat& depth_mat = channels[0];        // Current depth
-  cv::Mat& flow_x = channels[1];       // Optical flow x
-  cv::Mat& flow_y = channels[2];       // Optical flow y
-  cv::Mat& depth_change = channels[3]; // Depth change ratio
+  cv::Mat& depth_mat = channels[0];    // Current depth
+  cv::Mat& vx = channels[1];       // total velocity x
+  cv::Mat& vy = channels[2];       // total velocity y
+  cv::Mat& vz = channels[3];       // total velocity z
 
   double cx, cy, fy;
   // Camera model initialization
@@ -713,7 +752,7 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
     _depth_sampling_margin, body_to_world, _goal_in_world_frame, _world_frame,
     _3d_planning, _2d_z_margin, _is_spiral_sampling, _spiral_sampling_step);
 
-  DuPlanner planner(depth_mat, camera, _collision_checking_method,
+  DuPlanner planner(depth_mat, vx, vy, vz, camera, _collision_checking_method,
                     _checking_time_ratio, _sampled_trajectories_threshold,
                     _checked_trajectories_threshold, _debug_num_trajectories,
                     _collision_probability_threshold, _openmp_chunk_size);

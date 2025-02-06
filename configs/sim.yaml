@@ -35,8 +35,8 @@ sampled_trajectories_threshold: 10000
 checked_trajectories_threshold: 200
 3d_planning: yes
 2d_z_margin: 0.5
-traveling_cost: "distance" # "direction" or "distance"
-replan_factor: 3.0
+traveling_cost: "direction" # "direction" or "distance"
+replan_factor: 5.0
 debug_num_trajectories: yes
 collision_probability_threshold: 5
 openmp_chunk_size: 16
@@ -44,7 +44,7 @@ openmp_chunk_size: 16
 # Collision checking parameters
 true_vehicle_radius: 0.13
 planning_vehicle_radius: 0.4
-minimum_clear_distance: 1.2
+minimum_clear_distance: 1.0
 
 # SSTO trajectory generation parameters
 # Sampling parameters
@@ -54,11 +54,11 @@ depth_sampling_margin: 0.3
 is_spiral_sampling: no
 spiral_sampling_step: 3
 # Kinematic constraints
-max_velocity_x: 2.0
-max_velocity_y: 1.5
+max_velocity_x: 3.0
+max_velocity_y: 3.0
 max_velocity_z: 2.0
-max_acceleration_x: 6.0
-max_acceleration_y: 3.0
+max_acceleration_x: 8.5
+max_acceleration_y: 8.5
 max_acceleration_z: 6.0
 
 # Control parameters
