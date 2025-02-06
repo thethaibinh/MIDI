@@ -2,7 +2,7 @@
 # Scenario parameters
 runtime_mode: "flightmare" # "flightmare" or "mavros"
 collision_checking_method: "midi" # "midi" or "pyramid"
-visualise: no
+visualise: yes
 world_frame_name: "world"
 vehicle_frame_name: "vehicle"
 topics:
@@ -56,12 +56,12 @@ depth_sampling_margin: 0.3
 is_spiral_sampling: no
 spiral_sampling_step: 3
 # Kinematic constraints
-max_velocity_x: 3.0
-max_velocity_y: 3.0
+max_velocity_x: 4.0
+max_velocity_y: 4.0
 max_velocity_z: 2.0
 max_acceleration_x: 8.5
 max_acceleration_y: 8.5
-max_acceleration_z: 6.0
+max_acceleration_z: 4.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01

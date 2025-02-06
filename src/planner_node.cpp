@@ -297,6 +297,7 @@ void PlannerNode::update_reference_trajectory() {
   ros::Time wall_time_now = ros::Time::now();
   ros::Duration trajectory_point_time = wall_time_now - _reference_trajectory_start_time;
   double point_time = trajectory_point_time.toSec();
+  const std::lock_guard<std::mutex> lock(trajectory_mutex_);
   if (_is_periodic_replanning && point_time > _replanning_interval) {
     asign_reference_trajectory(wall_time_now);
   } else if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
@@ -305,9 +306,8 @@ void PlannerNode::update_reference_trajectory() {
 }
 
 void PlannerNode::asign_reference_trajectory(ros::Time wall_time_now) {
-  const std::lock_guard<std::mutex> lock(trajectory_mutex_);
   if (trajectory_queue_.empty()) {
-    reference_trajectory_ = ruckig::Trajectory<3>();
+    // reference_trajectory_ = ruckig::Trajectory<3>();
     return;
   }
   _steered = false;
@@ -772,7 +772,7 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
     // We only sent steering commands when we could not find
     // any feasible trajectory for 1 second in a row.
     if (ros::Duration(ros::Time::now() - _reference_trajectory_start_time).toSec() >
-          1.0 &&
+          _replanning_interval &&
         _planner_state == PlanningStates::TRAJECTORY_CONTROL && !_steered) {
       steering_value = planner.get_steering() / 20;
       _steered = true;
