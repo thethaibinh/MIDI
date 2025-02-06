@@ -179,7 +179,7 @@ class PlannerNode {
   void asign_reference_trajectory(ros::Time wall_time_now);
   bool check_valid_trajectory(const geometry_msgs::Point& current_position, const ruckig::Trajectory<3>& trajectory);
   void get_reference_point_at_time(
-    const ruckig::Trajectory<3>& reference_trajectory, const double& point_time,
+    const ruckig::Trajectory<3> reference_trajectory, const double& point_time,
     TrajectoryPoint& reference_point);
   bool loadParameters();
   void set_auto_pilot_state_forced(const PlanningStates& new_state);

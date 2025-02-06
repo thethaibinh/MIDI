@@ -164,8 +164,11 @@ void PlannerNode::start_callback(const std_msgs::Empty::ConstPtr& msg) {
   steering_value = 0.0f;
   _steered = false;
   trajectory_queue_.clear();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+  {
+    const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  }
 }
 
 void PlannerNode::reset_callback(const std_msgs::Empty::ConstPtr& msg) {
@@ -178,8 +181,11 @@ void PlannerNode::reset_callback(const std_msgs::Empty::ConstPtr& msg) {
     _goal_set = false;
   }
   trajectory_queue_.clear();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+  {
+    const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  }
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::State::ConstPtr& msg) {
@@ -282,10 +288,7 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
 }
 
 void PlannerNode::update_reference_trajectory() {
-  // checking if new trajectory planned
-  if (trajectory_queue_.empty()) return;
-
-  // only consider the latest
+  // only consider the latest if available
   while (trajectory_queue_.size() > 1) {
     trajectory_queue_.pop_front();
   }
@@ -294,27 +297,27 @@ void PlannerNode::update_reference_trajectory() {
   ros::Time wall_time_now = ros::Time::now();
   ros::Duration trajectory_point_time = wall_time_now - _reference_trajectory_start_time;
   double point_time = trajectory_point_time.toSec();
-  if (trajectory_queue_.size()) {
-    // Only track when there is a valid trajectory
-    if (!had_reference_trajectory) {
-      asign_reference_trajectory(wall_time_now);
-      had_reference_trajectory = true;
-    }
-    if (_is_periodic_replanning && point_time > _replanning_interval) {
-      asign_reference_trajectory(wall_time_now);
-    } else if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
-      asign_reference_trajectory(wall_time_now);
-    }
-    trajectory_queue_.pop_front();
+  if (_is_periodic_replanning && point_time > _replanning_interval) {
+    asign_reference_trajectory(wall_time_now);
+  } else if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
+    asign_reference_trajectory(wall_time_now);
   }
 }
 
 void PlannerNode::asign_reference_trajectory(ros::Time wall_time_now) {
   const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+  if (trajectory_queue_.empty()) {
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    return;
+  }
   _steered = false;
   steering_value = 0.0f;
   reference_trajectory_ = trajectory_queue_.front();
+  trajectory_queue_.pop_front();
   _reference_trajectory_start_time = wall_time_now;
+  if (!had_reference_trajectory) {
+    had_reference_trajectory = true;
+  }
 }
 
 void PlannerNode::control_loop(const ros::TimerEvent &event) {
@@ -500,7 +503,7 @@ void PlannerNode::public_ref_att(const ControlCommand& control_cmd) {
 }
 
 void PlannerNode::get_reference_point_at_time(
-  const ruckig::Trajectory<3>& reference_trajectory, const double& _point_time,
+  const ruckig::Trajectory<3> reference_trajectory, const double& _point_time,
   TrajectoryPoint& reference_point) {
 
   const double point_time = std::clamp(_point_time, 0.0, reference_trajectory.get_duration());
@@ -769,11 +772,11 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
     // We only sent steering commands when we could not find
     // any feasible trajectory for 1 second in a row.
     if (ros::Duration(ros::Time::now() - _reference_trajectory_start_time).toSec() >
-          2.5 &&
+          1.0 &&
         _planner_state == PlanningStates::TRAJECTORY_CONTROL && !_steered) {
-      const std::lock_guard<std::mutex> lock(trajectory_mutex_);
-      steering_value = planner.get_steering() / 8;
+      steering_value = planner.get_steering() / 20;
       _steered = true;
+      trajectory_queue_.clear();
     }
     return;
   }
@@ -783,7 +786,6 @@ void PlannerNode::plan(const sensor_msgs::ImageConstPtr& scene_flow_msg) {
 
   // New traj generated
   {
-    const std::lock_guard<std::mutex> lock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
     opt_traj.assign_body_to_world_transform(body_to_world);
