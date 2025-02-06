@@ -2,7 +2,7 @@
 # Scenario parameters
 runtime_mode: "flightmare" # "flightmare" or "mavros"
 collision_checking_method: "midi" # "midi" or "pyramid"
-visualise: yes
+visualise: no
 world_frame_name: "world"
 vehicle_frame_name: "vehicle"
 topics:
@@ -37,7 +37,7 @@ checked_trajectories_threshold: 200
 2d_z_margin: 0.5
 traveling_cost: "direction" # "direction" or "distance"
 replan_factor: 5.0
-debug_num_trajectories: yes
+debug_num_trajectories: no
 collision_probability_threshold: 5
 openmp_chunk_size: 16
 

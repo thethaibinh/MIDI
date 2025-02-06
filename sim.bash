@@ -34,6 +34,12 @@ fi
 
 SUMMARY_FILE="evaluation.yaml"
 
+# Launch sceneflow
+cd ../cscv/
+CUDA_VISIBLE_DEVICES=0 python3 sceneflow_node.py --model=$parent_path/cscv/checkpoints/Demo_scaleflowpp.pth --mixed_precision --start=0 &
+SF_PID="$!"
+cd -
+
 # Perform N evaluation runs
 for i in $(eval echo {1..$N})
   do
@@ -46,10 +52,6 @@ for i in $(eval echo {1..$N})
   python3 benchmarking_node.py --policy=midi &
   PY_PID="$!"
   cd -
-  cd ../cscv/
-  CUDA_VISIBLE_DEVICES=0 python3 sceneflow_node.py --model=$parent_path/cscv/checkpoints/Demo_scaleflowpp.pth --mixed_precision --start=0 &
-  SF_PID="$!"
-  cd -
   sleep 0.5
   rostopic pub /kingfisher/start_navigation std_msgs/Empty "{}" --once
 
@@ -60,8 +62,6 @@ for i in $(eval echo {1..$N})
   done
   cat "$SUMMARY_FILE" "../agile_flight/envtest/ros/summary.yaml" > "tmp.yaml"
   mv "tmp.yaml" "$SUMMARY_FILE"
-
-  # kill -SIGINT "$COMP_PID"
 done
 
 if [ $ROS_PID ]
