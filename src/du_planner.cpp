@@ -377,10 +377,10 @@ bool DuPlanner::is_segment2_collision_free(const ruckig::InputParameter<3>& init
       const double vy_cam = initial_state.current_velocity[1];
       const double vz_cam = initial_state.current_velocity[2];
       // Camera motion induced flow
-      const double induced_flow_x = (camera.get_fx() * vx_cam - (x - camera.get_cx()) * vz_cam) / spatial_z;
-      const double induced_flow_y = (camera.get_fy() * vy_cam - (y - camera.get_cy()) * vz_cam) / spatial_z;
-      const double vx = _vx_data[y * img_width + x] - induced_flow_x;
-      const double vy = _vy_data[y * img_width + x] - induced_flow_y;
+      // const double induced_flow_x = (camera.get_fx() * vx_cam - (x - camera.get_cx()) * vz_cam) / spatial_z;
+      // const double induced_flow_y = (camera.get_fy() * vy_cam - (y - camera.get_cy()) * vz_cam) / spatial_z;
+      const double vx = _vx_data[y * img_width + x] - vx_cam;
+      const double vy = _vy_data[y * img_width + x] - vy_cam;
       const double vz = _vz_data[y * img_width + x] - vz_cam;
       // Collision checking for pixels with depth greater than checking_depth and less than checking_depth + 2
       if (spatial_z > checking_depth) {
