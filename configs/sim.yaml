@@ -8,6 +8,10 @@ vehicle_frame_name: "vehicle"
 topics:
   depth: "/kingfisher/dodgeros_pilot/unity/depth"
   rgb: "/kingfisher/dodgeros_pilot/unity/image"
+  prev_rgb: "/kingfisher/dodgeros_pilot/unity/prev_rgb"
+  current_rgb: "/kingfisher/dodgeros_pilot/unity/current_rgb"
+  depth_change: "/scene_flow/depth_change"
+  flow: "/scene_flow/flow"
   scene_flow: "/scene_flow/depth_velocity"
 goal_coordinate:
   north: 60
