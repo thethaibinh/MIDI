@@ -40,9 +40,9 @@ checked_trajectories_threshold: 200
 3d_planning: yes
 2d_z_margin: 0.5
 traveling_cost: "direction" # "direction" or "distance"
-replan_factor: 5.0
+replan_factor: 2.0
 is_periodic_replanning: yes
-replanning_interval: 0.2
+replanning_interval: 1.0
 debug_num_trajectories: no
 collision_probability_threshold: 5
 openmp_chunk_size: 16
@@ -69,5 +69,5 @@ max_acceleration_z: 4.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01
-go_to_goal_threshold: 3.0 # distance to goal for switching control
+go_to_goal_threshold: 2.0 # distance to goal for switching control
 mavros_control_mode: "kinematic"
