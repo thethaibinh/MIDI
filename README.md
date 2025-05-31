@@ -3,8 +3,7 @@
 This repository contains the implementation code for the algorithm described in the manuscript "[Non-Conservative Efficient Collision Checking and Depth Noise-Awareness for Trajectory Planning](https://www.techrxiv.org/users/915189/articles/1288172-non-conservative-efficient-collision-checking-and-depth-noise-awareness-for-trajectory-planning)". Please don't hesitate to contact the corresponding author [Thai Binh Nguyen](mailto:thethaibinh@gmail.com) if you have any requests.
 
 ## Demonstration video
-[![MIDI](https://img.youtube.com/vi/zv_CQVPB5Ls/0.jpg)](https://www.youtube.com/watch?v=zv_CQVPB5Ls)
-
+[![MIDI](https://img.youtube.com/vi/gy2q8j73eBw/0.jpg)](https://www.youtube.com/watch?v=gy2q8j73eBw)
 ## Update
 Detailed instructions are coming soon!
 
