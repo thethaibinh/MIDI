@@ -21,6 +21,7 @@ sudo apt install python3-catkin-tools python3-vcstool git
 ```
 4. Install [anaconda](https://www.anaconda.com/).
 5. Install CUDA 12.7 following [this guide](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=20.04).
+**Note: The program no longer runs on CUDA. This step exists due to legacy code that has not yet been refactored. We apologize for any inconvenience.**
 
 ### Installation
 Start by creating a new catkin workspace.
