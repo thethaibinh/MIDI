@@ -1,18 +1,17 @@
 /*!
  * Copyright 2024 by Binh Nguyen <thethaibinh@gmail.com>
  *
- * This code is free software: you can redistribute
- * it and/or modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation, either
- * version 3 of the License, or (at your option) any later version.
+ * This code is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License.
+ * You may use, redistribute, and modify this code for non-commercial purposes only, provided that:
+ * 1. You give appropriate credit to the original author
+ * 2. You indicate if changes were made
  *
- * This code is distributed in the hope that it will
- * be useful, but WITHOUT ANY WARRANTY; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * This code is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  *
- * You should have received a copy of the GNU General Public License
- * along with the code.  If not, see <http://www.gnu.org/licenses/>.
+ * For commercial use, please contact the author for licensing terms.
+ * Full license text: https://creativecommons.org/licenses/by-nc/4.0/
  */
 
 #include "common_math/cuda_segment3.cuh"
