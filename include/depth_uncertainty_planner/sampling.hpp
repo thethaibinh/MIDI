@@ -11,12 +11,12 @@
 #include "common_math/pinhole_camera_model.hpp"
 #include "common_math/frame_transforms.hpp"
 
-// ROS base
-#include <ros/console.h>
-#include "ros/ros.h"
-#include <geometry_msgs/TransformStamped.h>
-// ROS TF2
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+// ROS2
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/point_stamped.hpp>
+// TF2
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 using namespace frame_transform;
 
@@ -40,8 +40,8 @@ class RandomTrajectorySampler {
                           const double& depth_lower_bound,
                           const Eigen::Vector3d& exploration_vector,
                           const double& depth_sampling_margin,
-                          const geometry_msgs::TransformStamped& body_to_world,
-                          const geometry_msgs::Point& goal_in_world_frame,
+                          const geometry_msgs::msg::TransformStamped& body_to_world,
+                          const geometry_msgs::msg::Point& goal_in_world_frame,
                           const std::string& world_frame_name,
                           const bool& _3d_planning,
                           const double& _2d_z_margin,
@@ -134,15 +134,15 @@ class RandomTrajectorySampler {
   }
 
   bool valid_2d_z(const Eigen::Vector3d& sampled_point) {
-    geometry_msgs::PointStamped sampled_point_in_body_frame;
+    geometry_msgs::msg::PointStamped sampled_point_in_body_frame;
     sampled_point_in_body_frame.header.frame_id = _world_frame;
     transform_camera_to_body(sampled_point, sampled_point_in_body_frame.point);
 
-    geometry_msgs::PointStamped sampled_point_in_world_frame;
+    geometry_msgs::msg::PointStamped sampled_point_in_world_frame;
     try {
       tf2::doTransform(sampled_point_in_body_frame, sampled_point_in_world_frame, _body_to_world);
     } catch (tf2::TransformException& ex) {
-      ROS_WARN("Failure %s\n", ex.what());  // Print exception which was caught
+      std::cerr << "TF2 Transform failure: " << ex.what() << std::endl;
     }
     return abs(sampled_point_in_world_frame.point.z - _goal_in_world_frame.z) <= _2d_z_margin;
   }
@@ -216,8 +216,8 @@ class RandomTrajectorySampler {
   double _depth_sampling_margin, _2d_z_margin;
   bool _3d_planning;
   std::string _world_frame;
-  geometry_msgs::TransformStamped _body_to_world;
-  geometry_msgs::Point _goal_in_world_frame;
+  geometry_msgs::msg::TransformStamped _body_to_world;
+  geometry_msgs::msg::Point _goal_in_world_frame;
   int _spiral_x;           // Current x offset from center
   int _spiral_y;           // Current y offset from center
   int _spiral_leg;         // Current leg length

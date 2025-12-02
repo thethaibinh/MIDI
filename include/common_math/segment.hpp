@@ -16,11 +16,8 @@
 
 #pragma once
 #include <vector>
-// Eigen catkin
+// Eigen
 #include <Eigen/Dense>
-// ROS base
-#include <ros/console.h>
-#include "ros/ros.h"
 
 namespace common_math {
 

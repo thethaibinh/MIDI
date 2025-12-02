@@ -31,12 +31,6 @@
 #include "depth_uncertainty_planner/trajectory_cost.hpp"
 #include "depth_uncertainty_planner/sampling.hpp"
 
-// CUDA
-#include "common_math/cuda_segment.cuh"
-#include "common_math/cuda_segment2.cuh"
-#include "common_math/cuda_segment3.cuh"
-#include "common_math/cuda_conversions.cuh"
-#include "common_math/cuda_monotonic_segment3.cuh"
 // Ruckig
 #include <ruckig/ruckig.hpp>
 #include <ruckig/profile.hpp>
@@ -165,11 +159,7 @@ class DuPlanner {
    */
   // bool is_segment3_collision_free(const ThirdOrderSegment* segment);
 
-  bool is_cuda_segment3_collision_free(const CudaThirdOrderSegment* segment);
-
   bool is_segment2_collision_free(const SecondOrderSegment* segment, double& trajectory_collision_probability, double& mahalanobis_distance);
-
-  bool is_cuda_segment2_collision_free(const CudaSecondOrderSegment* segment, double& trajectory_collision_probability, double& mahalanobis_distance);
 
   double segment_collision_cost(const Segment* segment);
 
@@ -181,11 +171,8 @@ class DuPlanner {
    */
   std::vector<MonotonicSegment3> get_monotonic_segments(const ThirdOrderSegment* segment);
 
-  std::vector<CudaMonotonicSegment3> get_cuda_monotonic_segments(const CudaThirdOrderSegment* segment);
-
   std::vector<Segment*> get_segments(const ruckig::Trajectory<3> trajectory);
 
-  std::vector<CudaSegment*> get_cuda_segments(const ruckig::Trajectory<3> trajectory);
   //! Tries to find an existing pyramid that contains the given sample point
   /*!
    * @param pixelX The x-coordinate of the sample point in pixel coordinates
@@ -206,8 +193,9 @@ class DuPlanner {
    * the collision with the deepest depth occurs.
    * @return True if the trajectory collides with at least one lateral face of the pyramid
    */
-  bool find_deepest_collision_time(CudaMonotonicSegment3 mono_traj, Pyramid pyramid,
-                                double& out_collision_time);
+  // CUDA function removed for CPU-only build (PYRAMID method only)
+  // bool find_deepest_collision_time(CudaMonotonicSegment3 mono_traj, Pyramid pyramid,
+  //                              double& out_collision_time);
 
   //! Attempts to generate a pyramid that contains a given point.
   /*!

@@ -1,10 +1,12 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/Twist.h>
-#include <geometry_msgs/TwistStamped.h>
-#include <geometry_msgs/Vector3.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
 #include <Eigen/Dense>
 
 #define ANTI_G_ENU 9.80665
@@ -16,94 +18,94 @@ static Eigen::Vector3d body_rdf_from_flu_eigen(const Eigen::Vector3d &m) {
   return v;
 }
 
-static Eigen::Vector3d body_rdf_from_flu_eigen(const geometry_msgs::Vector3 &m) {
+static Eigen::Vector3d body_rdf_from_flu_eigen(const geometry_msgs::msg::Vector3 &m) {
   Eigen::Vector3d v;
   v << -m.y, -m.z, m.x;
   return v;
 }
 
-static geometry_msgs::Vector3 body_rdf_from_flu_geometry_vector3(const geometry_msgs::Vector3 &m) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 body_rdf_from_flu_geometry_vector3(const geometry_msgs::msg::Vector3 &m) {
+  geometry_msgs::msg::Vector3 v;
   v.x = -m.y;
   v.y = -m.z;
   v.z =  m.x;
   return v;
 }
 
-static geometry_msgs::Vector3 map_enu_from_nwu_double(const double &x, const double &y, const double &z) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 map_enu_from_nwu_double(const double &x, const double &y, const double &z) {
+  geometry_msgs::msg::Vector3 v;
   v.x = -y;
   v.y = x;
   v.z = z;
   return v;
 }
 
-static geometry_msgs::Vector3 body_rdf_from_flu_geometry_vector3(const Eigen::Vector3d &m) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 body_rdf_from_flu_geometry_vector3(const Eigen::Vector3d &m) {
+  geometry_msgs::msg::Vector3 v;
   v.x = -m(1);
   v.y = -m(2);
   v.z =  m(0);
   return v;
 }
 
-static geometry_msgs::Point body_rdf_from_flu_geometry_point(const Eigen::Vector3d &m) {
-  geometry_msgs::Point v;
+static geometry_msgs::msg::Point body_rdf_from_flu_geometry_point(const Eigen::Vector3d &m) {
+  geometry_msgs::msg::Point v;
   v.x = -m(1);
   v.y = -m(2);
   v.z =  m(0);
   return v;
 }
 
-static geometry_msgs::Point body_rdf_from_flu_geometry_point(const geometry_msgs::Point &m) {
-  geometry_msgs::Point v;
+static geometry_msgs::msg::Point body_rdf_from_flu_geometry_point(const geometry_msgs::msg::Point &m) {
+  geometry_msgs::msg::Point v;
   v.x = -m.y;
   v.y = -m.z;
   v.z =  m.x;
   return v;
 }
 
-static geometry_msgs::Vector3 body_flu_from_rdf_geometry_vector3(const Eigen::Vector3d &m) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 body_flu_from_rdf_geometry_vector3(const Eigen::Vector3d &m) {
+  geometry_msgs::msg::Vector3 v;
   v.x = m(2);
   v.y = -m(0);
   v.z = -m(1);
   return v;
 }
 
-static geometry_msgs::Vector3 body_flu_from_rdf_geometry_vector3(const geometry_msgs::Vector3 &m) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 body_flu_from_rdf_geometry_vector3(const geometry_msgs::msg::Vector3 &m) {
+  geometry_msgs::msg::Vector3 v;
   v.x = m.z;
   v.y = -m.x;
   v.z = -m.y;
   return v;
 }
 
-static geometry_msgs::Point body_flu_from_rdf_geometry_point(const Eigen::Vector3d &m) {
-  geometry_msgs::Point v;
+static geometry_msgs::msg::Point body_flu_from_rdf_geometry_point(const Eigen::Vector3d &m) {
+  geometry_msgs::msg::Point v;
   v.x = m(2);
   v.y = -m(0);
   v.z = -m(1);
   return v;
 }
 
-static geometry_msgs::Point body_flu_from_rdf_geometry_point(const geometry_msgs::Point &m) {
-  geometry_msgs::Point v;
+static geometry_msgs::msg::Point body_flu_from_rdf_geometry_point(const geometry_msgs::msg::Point &m) {
+  geometry_msgs::msg::Point v;
   v.x = m.z;
   v.y = -m.x;
   v.z = -m.y;
   return v;
 }
 
-static geometry_msgs::Point neu_from_enu_geometry_point(const geometry_msgs::Point &m) {
-  geometry_msgs::Point v;
+static geometry_msgs::msg::Point neu_from_enu_geometry_point(const geometry_msgs::msg::Point &m) {
+  geometry_msgs::msg::Point v;
   v.x = m.y;
   v.y = m.x;
   v.z = m.z;
   return v;
 }
 
-static geometry_msgs::Vector3 neu_from_enu_geometry_vector3(const geometry_msgs::Vector3 &m) {
-  geometry_msgs::Vector3 v;
+static geometry_msgs::msg::Vector3 neu_from_enu_geometry_vector3(const geometry_msgs::msg::Vector3 &m) {
+  geometry_msgs::msg::Vector3 v;
   v.x = m.y;
   v.y = m.x;
   v.z = m.z;
@@ -123,22 +125,45 @@ static geometry_msgs::Vector3 neu_from_enu_geometry_vector3(const geometry_msgs:
 //   return ev3;
 // }
 
-inline Eigen::Vector3d toEigen(const geometry_msgs::Point &p) {
-  Eigen::Vector3d ev3(p.x, p.y, p.z);
-  return ev3;
-}
+// inline Eigen::Vector3d toEigen(const geometry_msgs::msg::Point &p) {
+//   Eigen::Vector3d ev3(p.x, p.y, p.z);
+//   return ev3;
+// }
 
-inline Eigen::Vector3d toEigen(const geometry_msgs::Vector3 &v3) {
-  Eigen::Vector3d ev3(v3.x, v3.y, v3.z);
-  return ev3;
-}
+// inline Eigen::Vector3d toEigen(const geometry_msgs::msg::Vector3 &v3) {
+//   Eigen::Vector3d ev3(v3.x, v3.y, v3.z);
+//   return ev3;
+// }
 
-inline geometry_msgs::Vector3 toGeometry(const Eigen::Vector3d &v3) {
-  geometry_msgs::Vector3 gev3;
-  gev3.x = v3(0),
-  gev3.y = v3(1),
-  gev3.z = v3(2);
-  return gev3;
+// inline geometry_msgs::msg::Vector3 toGeometry(const Eigen::Vector3d &v3) {
+//   geometry_msgs::msg::Vector3 gev3;
+//   gev3.x = v3(0),
+//   gev3.y = v3(1),
+//   gev3.z = v3(2);
+//   return gev3;
+// }
+
+// Conversion functions moved to common_math/geometry_eigen_conversions.h to avoid duplicates
+// Use those instead
+
+inline Eigen::Vector3d quaternionToEulerAnglesZYX(const Eigen::Quaterniond &q) {
+  // Roll (x), Pitch (y), Yaw (z)
+  Eigen::Vector3d angles;
+  // roll (x-axis rotation)
+  double sinr_cosp = 2 * (q.w() * q.x() + q.y() * q.z());
+  double cosr_cosp = 1 - 2 * (q.x() * q.x() + q.y() * q.y());
+  angles(0) = std::atan2(sinr_cosp, cosr_cosp);
+  // pitch (y-axis rotation)
+  double sinp = 2 * (q.w() * q.y() - q.z() * q.x());
+  if (std::abs(sinp) >= 1)
+    angles(1) = std::copysign(M_PI / 2, sinp); // use 90 degrees if out of range
+  else
+    angles(1) = std::asin(sinp);
+  // yaw (z-axis rotation)
+  double siny_cosp = 2 * (q.w() * q.z() + q.x() * q.y());
+  double cosy_cosp = 1 - 2 * (q.y() * q.y() + q.z() * q.z());
+  angles(2) = std::atan2(siny_cosp, cosy_cosp);
+  return angles;
 }
 
 inline Eigen::Vector4d quatMultiplication(const Eigen::Vector4d &q, const Eigen::Vector4d &p) {

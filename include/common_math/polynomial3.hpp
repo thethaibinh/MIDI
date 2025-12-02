@@ -17,9 +17,6 @@
 #pragma once
 #include "common_math/polynomial.hpp"
 #include "common_math/polynomial2.hpp"
-// ROS base
-#include <ros/console.h>
-#include "ros/ros.h"
 
 class ThirdOrderPolynomial : public Polynomial {
  public:

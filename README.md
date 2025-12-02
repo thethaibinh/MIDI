@@ -15,13 +15,10 @@ We currently support Ubuntu 20.04 with ROS noetic and CUDA 12.7. Other setups ar
 
 2. In addition, make sure to have ROS installed. Follow [this guide](http://wiki.ros.org/noetic/Installation/Ubuntu) and install ROS Noetic if you don't already have it.
 
-3. Install catkin tools, vcstool.
+3. Install vcstool.
 ```
-sudo apt install python3-catkin-tools python3-vcstool git
+pip install vcstool
 ```
-4. Install [anaconda](https://www.anaconda.com/).
-5. Install CUDA 12.7 following [this guide](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=20.04).
-**Note: The program no longer runs on CUDA. This step exists due to legacy code that has not yet been refactored. We apologize for any inconvenience.**
 
 ### Installation
 Start by creating a new catkin workspace.
@@ -31,15 +28,9 @@ export ROS_VERSION=noetic
 export CATKIN_WS=./ros_ws
 mkdir -p $CATKIN_WS/src
 cd $CATKIN_WS
-echo "source $PWD/devel/setup.bash" >> ~/.bashrc
-catkin init
-catkin config --extend /opt/ros/$ROS_VERSION
-catkin config --merge-devel
-catkin config --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-fdiagnostics-color
 
 cd src
 git clone https://github.com/thethaibinh/midi
-vcs import < midi/midi.repos
 cd midi
 git submodule update --init --recursive
 ```

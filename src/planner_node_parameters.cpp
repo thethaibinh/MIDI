@@ -1,41 +1,60 @@
 #include "planner_node.hpp"
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 bool PlannerNode::loadParameters() {
-  // Load trajectory tracking controller parameters
-  if (!base_controller_params_.loadParameters(pnh_)) return false;
 
-  // Load sim parameters
-  std::string sim_config_path = std::string(getenv("FLIGHTMARE_PATH")) +
-                                "/flightpy/configs/vision/config.yaml";
-  YAML::Node sim_config = YAML::LoadFile(sim_config_path);
-  // Load fov from Flightmare sim config
-  if (!sim_config["rgb_camera"]) {
-    ROS_WARN("RGB camera not found in sim config file");
+  // Declare and get parameters
+  this->declare_parameter<std::string>("scenario", "sitl");
+  this->declare_parameter<std::string>("planner_config_path", "");
+  
+  std::string scenario_str;
+  if (!this->get_parameter("scenario", scenario_str)) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to get scenario parameter");
     return false;
   }
-  _flightmare_fov = sim_config["rgb_camera"]["fov"].as<double>();
 
-  // Load scenario parameters
-  std::string scenario_str;
-  if (!quadrotor_common::getParam("scenario", scenario_str, pnh_))
-    return false;
-  const std::string planner_config_path = std::string(getenv("PLANNER_PATH")) + "/configs/" + scenario_str + ".yaml";
+  // Get planner config path from parameter or environment
+  std::string planner_config_path;
+  if (this->get_parameter("planner_config_path", planner_config_path) && !planner_config_path.empty()) {
+    // Use provided path
+  } else {
+    // Try to construct from environment variable
+    const char* planner_path_env = std::getenv("PLANNER_PATH");
+    if (planner_path_env) {
+      planner_config_path = std::string(planner_path_env) + "/configs/" + scenario_str + ".yaml";
+    } else {
+      // Use relative path in the install directory
+      planner_config_path = ament_index_cpp::get_package_share_directory("midi") + "/configs/" + scenario_str + ".yaml";
+    }
+  }
+
+  RCLCPP_INFO(this->get_logger(), "Loading planner config from: %s", planner_config_path.c_str());
 
   // Load planner parameters
-  YAML::Node planner_config = YAML::LoadFile(planner_config_path);
-  if (!planner_config) {
-    ROS_WARN("Planning config file not found");
+  YAML::Node planner_config;
+  try {
+    planner_config = YAML::LoadFile(planner_config_path);
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to load planning config file: %s", e.what());
     return false;
   }
-  ROS_WARN("Planner config file: %s", planner_config_path.c_str());
-  // Scenario parameters
+
+  if (!planner_config) {
+    RCLCPP_WARN(this->get_logger(), "Planning config file not found");
+    return false;
+  }
+
   // Runtime mode
   std::string runtime_mode_str = planner_config["runtime_mode"].as<std::string>();
-  if (runtime_mode_str == "flightmare") {
-    _runtime_mode = RuntimeModes::FLIGHTMARE;
+  if (runtime_mode_str == "omnidrones") {
+    _runtime_mode = RuntimeModes::OMNIDRONES;
+    // Load OmniDrones FOV
+    _flightmare_fov = planner_config["omnidrones_fov"] ? 
+                      planner_config["omnidrones_fov"].as<double>() : 90.0;
   } else if (runtime_mode_str == "mavros") {
     _runtime_mode = RuntimeModes::MAVROS;
   }
+
   // Collision checking method
   std::string collision_checking_method_str = planner_config["collision_checking_method"].as<std::string>();
   if (collision_checking_method_str == "midi") {
@@ -43,26 +62,30 @@ bool PlannerNode::loadParameters() {
   } else if (collision_checking_method_str == "pyramid") {
     _collision_checking_method = CollisionCheckingMethod::PYRAMID;
   }
+
   // Visualisation
   _visualise = planner_config["visualise"].as<bool>();
+
   // Frame names
   _world_frame = planner_config["world_frame_name"].as<std::string>();
   _vehicle_frame = planner_config["vehicle_frame_name"].as<std::string>();
-  // topics
+
+  // Topics
   _depth_topic = planner_config["topics"]["depth"].as<std::string>();
+
   // Goal coordinates
-  // For MAVROS ENU, record goal coordinates once taken off due to the takeoff
-  // place is not the origin (0,0,0)
   _goal_north_coordinate = planner_config["goal_coordinate"]["north"].as<double>();
   _goal_west_coordinate = planner_config["goal_coordinate"]["west"].as<double>();
   _goal_up_coordinate = planner_config["goal_coordinate"]["up"].as<double>();
-  // For Flightmare NWU, take goal coordinates from config file
-  if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
-    _goal_in_world_frame.x = _goal_north_coordinate;
-    _goal_in_world_frame.y = _goal_west_coordinate;
-    _goal_in_world_frame.z = _goal_up_coordinate;
+
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // For OmniDrones, goal is in absolute ENU coordinates
+    _goal_in_world_frame.x = _goal_west_coordinate;   // X = East
+    _goal_in_world_frame.y = _goal_north_coordinate;  // Y = North
+    _goal_in_world_frame.z = _goal_up_coordinate;     // Z = Up
     _goal_set = true;
   }
+
   // Depth camera parameters
   _depth_scale = planner_config["depth_camera"]["depth_scale"].as<double>();
   if (_runtime_mode == RuntimeModes::MAVROS) {
@@ -71,6 +94,7 @@ bool PlannerNode::loadParameters() {
     _real_cx = planner_config["depth_camera"]["cx"].as<double>() / _decimation_factor;
     _real_cy = planner_config["depth_camera"]["cy"].as<double>() / _decimation_factor;
   }
+
   std::vector<double> temp;
   temp.push_back(planner_config["depth_camera"]["depth_uncertainty"]["ca0"].as<double>());
   temp.push_back(planner_config["depth_camera"]["depth_uncertainty"]["ca1"].as<double>());
@@ -87,12 +111,14 @@ bool PlannerNode::loadParameters() {
   _checked_trajectories_threshold = planner_config["checked_trajectories_threshold"].as<int>();
   _3d_planning = planner_config["3d_planning"].as<bool>();
   _2d_z_margin = planner_config["2d_z_margin"].as<double>();
+  
   std::string traveling_cost_str = planner_config["traveling_cost"].as<std::string>();
   if (traveling_cost_str == "direction") {
     _traveling_cost = TravelingCost::DIRECTION;
   } else if (traveling_cost_str == "distance") {
     _traveling_cost = TravelingCost::DISTANCE;
   }
+  
   _replan_factor = planner_config["replan_factor"].as<double>();
   _debug_num_trajectories = planner_config["debug_num_trajectories"].as<bool>();
   _collision_probability_threshold = planner_config["collision_probability_threshold"].as<double>();
@@ -105,12 +131,12 @@ bool PlannerNode::loadParameters() {
   _minimum_clear_distance = planner_config["minimum_clear_distance"].as<double>();
 
   // SSTO trajectory generation parameters
-  // Sampling parameters
   _depth_upper_bound = planner_config["depth_upper_bound"].as<double>();
   _depth_lower_bound = planner_config["depth_lower_bound"].as<double>();
   _depth_sampling_margin = planner_config["depth_sampling_margin"].as<double>();
   _is_spiral_sampling = planner_config["is_spiral_sampling"].as<bool>();
   _spiral_sampling_step = planner_config["spiral_sampling_step"].as<uint8_t>();
+
   // Kinematic constraints
   _max_velocity_x = planner_config["max_velocity_x"].as<double>();
   _max_velocity_y = planner_config["max_velocity_y"].as<double>();
@@ -122,11 +148,13 @@ bool PlannerNode::loadParameters() {
   // Control parameters
   _trajectory_discretisation_cycle = planner_config["trajectory_discretisation_cycle"].as<double>();
   _go_to_goal_threshold = planner_config["go_to_goal_threshold"].as<double>();
+  
   std::string mavros_control_mode_str = planner_config["mavros_control_mode"].as<std::string>();
   if (mavros_control_mode_str == "kinematic")
     _mavros_control_mode = MavrosControlModes::KINEMATIC;
   else if (mavros_control_mode_str == "attitude")
     _mavros_control_mode = MavrosControlModes::ATTITUDE;
 
+  RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
   return true;
 }
