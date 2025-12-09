@@ -8,12 +8,12 @@ vehicle_frame_name: "base_link"
 
 # Topics
 topics:
-  depth: "/camera/depth/image_raw"
+  depth: "camera/depth/image_raw"
 
 # Goal coordinates (absolute in ENU world frame)
 goal_coordinate:
   north: 20.0   # North (meters in ENU Y direction)
-  west: 5.0     # West (meters in ENU X direction)  
+  west: 5.0     # West (meters in ENU X direction)
   up: 3.0       # Up (meters in ENU Z direction)
 
 # Depth camera parameters (OmniDrones camera config)

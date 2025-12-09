@@ -27,11 +27,14 @@ PlannerNode::PlannerNode()
   // Publishers
   point_cloud_pub = this->create_publisher<sm::PointCloud2>("/cloud_out", 10);
   visual_pub = this->create_publisher<visualization_msgs::msg::Marker>("/visualization", 10);
-  
+
   // Publishers based on runtime mode
-  if (_runtime_mode == RuntimeModes::MAVROS) {
+  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Position/velocity/acceleration setpoints (PositionTarget)
     raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("mavros/setpoint_raw/local", 10);
-  } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+  }
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Velocity-only setpoints (TwistStamped) - alternative control mode
     vel_cmd_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>("mavros/setpoint_velocity/cmd_vel", 10);
   }
 
@@ -39,7 +42,7 @@ PlannerNode::PlannerNode()
   image_sub = this->create_subscription<sm::Image>(
     _depth_topic, 10,
     std::bind(&PlannerNode::img_callback, this, std::placeholders::_1));
-  
+
   if (_visualise) {
     visual_sub = this->create_subscription<sm::Image>(
       _depth_topic, 10,
@@ -197,7 +200,7 @@ void PlannerNode::mav_accel_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
 
 void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
   const std::lock_guard<std::mutex> lock(state_mutex_);
-  
+
   _state.t = rclcpp::Time(msg->header.stamp).seconds();
   _state.pose = msg->pose.pose;
   _state.velocity = msg->twist.twist;
@@ -245,7 +248,7 @@ void PlannerNode::update_planner_state() {
       flight_controller_status.mode == "GUIDED" && flight_controller_status.armed) {
     auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
     request->altitude = _goal_in_world_frame.z;
-    
+
     if (takeoff_srv->service_is_ready()) {
       auto result = takeoff_srv->async_send_request(request);
       if (result.valid()) {
@@ -253,7 +256,7 @@ void PlannerNode::update_planner_state() {
         RCLCPP_WARN(this->get_logger(), "Taken off!");
       }
     }
-    
+
     if (!_goal_set) {
       _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
       _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
@@ -272,7 +275,7 @@ void PlannerNode::update_planner_state() {
   geometry_msgs::msg::Point goal_in_world_frame = _goal_in_world_frame;
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
-  
+
   if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::START) {
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
   }
@@ -339,10 +342,14 @@ void PlannerNode::track_trajectory() {
     RCLCPP_WARN(this->get_logger(), "State is too old, skipping control command");
     return;
   }
-  
+
   if (_runtime_mode == RuntimeModes::MAVROS && _mavros_control_mode == MavrosControlModes::KINEMATIC) {
     public_ref_pos(reference_point);
   } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones supports both position and velocity control
+    // Use PositionTarget for full state control (position + velocity + acceleration)
+    public_ref_pos(reference_point);
+    // Also publish velocity command for velocity-only control mode
     publish_velocity_command(reference_point);
   }
 }
@@ -369,17 +376,17 @@ void PlannerNode::publish_velocity_command(const TrajectoryPoint& reference_poin
   geometry_msgs::msg::TwistStamped vel_cmd;
   vel_cmd.header.stamp = this->now();
   vel_cmd.header.frame_id = "map";
-  
+
   // Velocity in world frame (ENU)
   vel_cmd.twist.linear.x = reference_point.velocity(0);
   vel_cmd.twist.linear.y = reference_point.velocity(1);
   vel_cmd.twist.linear.z = reference_point.velocity(2);
-  
+
   // No angular velocity for simple navigation
   vel_cmd.twist.angular.x = 0.0;
   vel_cmd.twist.angular.y = 0.0;
   vel_cmd.twist.angular.z = 0.0;
-  
+
   vel_cmd_pub->publish(vel_cmd);
 }
 
@@ -407,7 +414,7 @@ void PlannerNode::get_reference_point_at_time(
   frame_transform::transform_camera_to_body(velocity_in_camera_frame, velocity_in_body_frame);
   frame_transform::transform_camera_to_body(acceleration_in_camera_frame, acceleration_in_body_frame);
   frame_transform::transform_camera_to_body(jerk_in_camera_frame, jerk_in_body_frame);
-  
+
   try {
     tf2::doTransform(position_in_body_frame, position_in_world_frame, body_to_world);
     tf2::doTransform(velocity_in_body_frame, velocity_in_world_frame, body_to_world);
@@ -423,7 +430,7 @@ void PlannerNode::get_reference_point_at_time(
   double terminal_heading = atan2f(trajectory_vector[1], trajectory_vector[0]);
   reference_point.heading = terminal_heading;
   Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
-  
+
   if (fabs(steering_value) > 1e-6)
     reference_point.heading = current_euler_angles(2) + steering_value;
 
@@ -473,7 +480,7 @@ bool PlannerNode::check_valid_trajectory(
   double pos_diff = (geometryToEigen(current_position) -
                      geometryToEigen(trajectory.get_initial_position_in_world_frame())).norm();
   if (pos_diff > kPositionJumpTolerance_) {
-    RCLCPP_WARN(this->get_logger(), 
+    RCLCPP_WARN(this->get_logger(),
       "The received trajectory does not start at current position, rejecting it!");
     return false;
   }
@@ -517,7 +524,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     }
     tf2::doTransform(test_acceleration_body_frame, test_acceleration_world_frame, body_to_world);
   }
-  
+
   if (test_acceleration_world_frame.x > _acc_planning_threshold || test_acceleration_world_frame.y > _acc_planning_threshold)
     return;
 
