@@ -10,12 +10,12 @@ vehicle_frame_name: "base_link"  # MIDI publishes TF internally from odometry
 topics:
   depth: "camera/depth/image_raw"
 
-# Goal coordinates (in ENU world frame, relative to start position)
-# ENU: X=East, Y=North, Z=Up
+# Goal coordinates (in NWU world frame, relative to start position)
+# NWU: X=North, Y=West, Z=Up
 goal_coordinate:
-  north: 20.0   # North (meters in ENU Y direction)
-  west: 5.0     # West (negative X in ENU, will be subtracted)
-  up: 3.0       # Up (meters in ENU Z direction)
+  north: 20.0   # North (meters in NWU X direction)
+  west: 0.0     # West (meters in NWU Y direction)
+  up: 3.0       # Up (meters in NWU Z direction)
 
 # Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
 # Native: 1280x800, HFOV 127°, VFOV 79.5°

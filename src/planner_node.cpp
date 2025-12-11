@@ -149,10 +149,18 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     return;
   }
   
-  // Set goal coordinates
-  _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
-  _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
-  _goal_in_world_frame.z = _goal_up_coordinate;
+  // Set goal coordinates based on coordinate frame convention
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones uses NWU (North-West-Up): X=North, Y=West, Z=Up
+    _goal_in_world_frame.x = _state.pose.position.x + _goal_north_coordinate;
+    _goal_in_world_frame.y = _state.pose.position.y + _goal_west_coordinate;
+    _goal_in_world_frame.z = _goal_up_coordinate;
+  } else {
+    // MAVROS uses ENU (East-North-Up): X=East, Y=North, Z=Up
+    _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
+    _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
+    _goal_in_world_frame.z = _goal_up_coordinate;
+  }
   RCLCPP_INFO(this->get_logger(), "Setting goal to (%.2f, %.2f, %.2f)",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
   _goal_set = true;
