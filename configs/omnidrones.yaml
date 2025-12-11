@@ -4,25 +4,33 @@ runtime_mode: "omnidrones"
 collision_checking_method: "midi"  # MUST be "midi" - PYRAMID method removed (required CUDA)
 visualise: yes
 world_frame_name: "map"
-vehicle_frame_name: "base_link"
+vehicle_frame_name: "base_link"  # MIDI publishes TF internally from odometry
 
 # Topics
 topics:
   depth: "camera/depth/image_raw"
 
-# Goal coordinates (absolute in ENU world frame)
+# Goal coordinates (in ENU world frame, relative to start position)
+# ENU: X=East, Y=North, Z=Up
 goal_coordinate:
   north: 20.0   # North (meters in ENU Y direction)
-  west: 5.0     # West (meters in ENU X direction)
+  west: 5.0     # West (negative X in ENU, will be subtracted)
   up: 3.0       # Up (meters in ENU Z direction)
 
-# Depth camera parameters (OmniDrones camera config)
+# Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
+# Native: 1280x800, HFOV 127°, VFOV 79.5°
+# Simulated: 640x400 (2x decimation)
+#
+# Isaac Sim camera intrinsics:
+#   fx = focal_length_mm * width / horizontal_aperture_mm
+#   fx = 24 * 640 / 96.7 = 158.8 pixels
+#
 depth_camera:
-  depth_scale: 1.0  # OmniDrones distance_to_camera is already in meters
-  decimation_factor: 1
-  focal_length: 320.0   # Focal length in pixels (will be calculated from FOV)
-  cx: 320.0             # Principal point x (image center x)
-  cy: 240.0             # Principal point y (image center y)
+  depth_scale: 1.0  # OmniDrones publishes 32FC1 in meters
+  decimation_factor: 1  # Already decimated in OmniDrones
+  focal_length: 158.8   # fx = 24mm * 640px / 96.7mm (matches OmniDrones simulation)
+  cx: 320.0             # Principal point x (image center x = width/2)
+  cy: 200.0             # Principal point y (image center y = height/2)
   depth_uncertainty:
     ca0: 0.001
     ca1: 0.0007
@@ -30,9 +38,6 @@ depth_camera:
     cl0: 0.0
     cl1: 0.0005
     cl2: 0.0013
-
-# OmniDrones camera FOV (for focal length calculation)
-omnidrones_fov: 90.0  # Field of view in degrees
 
 # Planning parameters
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)

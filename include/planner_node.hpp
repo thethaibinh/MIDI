@@ -47,8 +47,12 @@
 // mavros messages (for Ardupilot mode)
 #include <mavros_msgs/msg/position_target.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <mavros_msgs/srv/command_bool.hpp>
 #include <mavros_msgs/srv/command_tol.hpp>
 #include <mavros_msgs/srv/set_mode.hpp>
+
+// Ground system messages
+#include <ground_system_msgs/msg/start_swarm_mission.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -73,6 +77,7 @@
 
 // ROS2 TF2
 #include <tf2_ros/transform_listener.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -103,6 +108,7 @@ class PlannerNode : public rclcpp::Node {
   std::shared_ptr<tf2_ros::Buffer> to_vehicle_buffer;
   std::shared_ptr<tf2_ros::TransformListener> to_world_tf2;
   std::shared_ptr<tf2_ros::TransformListener> to_vehicle_tf2;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_pub;
   rclcpp::Publisher<sm::PointCloud2>::SharedPtr point_cloud_pub;
@@ -111,7 +117,7 @@ class PlannerNode : public rclcpp::Node {
   
   rclcpp::Subscription<sm::Image>::SharedPtr image_sub;
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
@@ -119,9 +125,18 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr mav_twist_sub;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr mav_accel_sub;
   
+  // MAVROS service clients (non-blocking)
+  rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_srv;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_srv;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_srv;
   rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr mode_srv;
+  
+  // Service call state tracking (to avoid duplicate calls and blocking)
+  std::atomic<bool> mission_received_{false};
+  std::atomic<bool> mode_switch_pending_{false};
+  std::atomic<bool> arming_pending_{false};
+  std::atomic<bool> takeoff_pending_{false};
+  std::atomic<bool> land_pending_{false};
   
   rclcpp::TimerBase::SharedPtr control_loop_timer_;
   
@@ -151,7 +166,7 @@ class PlannerNode : public rclcpp::Node {
 
   // Callback functions
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
-  void start_callback(const std_msgs::msg::Empty::SharedPtr msg);
+  void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void img_callback(const sm::Image::SharedPtr depth_msg);
   void visualise(const sm::Image::SharedPtr depth_msg);

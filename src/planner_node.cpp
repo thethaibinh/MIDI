@@ -11,11 +11,12 @@ PlannerNode::PlannerNode()
     had_reference_trajectory(false),
     _goal_set(false) {
 
-  // Initialize TF2 buffers
+  // Initialize TF2 buffers and broadcaster
   to_world_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   to_vehicle_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   to_world_tf2 = std::make_shared<tf2_ros::TransformListener>(*to_world_buffer);
   to_vehicle_tf2 = std::make_shared<tf2_ros::TransformListener>(*to_vehicle_buffer);
+  tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
   // Load parameters
   if (!loadParameters()) {
@@ -49,16 +50,19 @@ PlannerNode::PlannerNode()
       std::bind(&PlannerNode::visualise, this, std::placeholders::_1));
   }
 
-  start_sub = this->create_subscription<std_msgs::msg::Empty>(
-    "/start_navigation", 10,
-    std::bind(&PlannerNode::start_callback, this, std::placeholders::_1));
+  // Mission command subscriber (unified for sim and real)
+  mission_sub = this->create_subscription<ground_system_msgs::msg::StartSwarmMission>(
+    "/start_swarm_mission", 10,
+    std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1));
 
   reset_sub = this->create_subscription<std_msgs::msg::Empty>(
     "/reset_planner", 10,
     std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1));
 
+  // Subscribe to odometry - use relative topic so namespace remapping works
+  // When running in /Drone1 namespace, this becomes /Drone1/odometry
   odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/odometry", 10,
+    "odometry", 10,
     std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
 
   mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
@@ -77,7 +81,8 @@ PlannerNode::PlannerNode()
     "mavros/imu/data_raw", 10,
     std::bind(&PlannerNode::mav_accel_callback, this, std::placeholders::_1));
 
-  // Services
+  // MAVROS service clients (for real FC)
+  arming_srv = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
   takeoff_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
   land_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
   mode_srv = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
@@ -100,17 +105,12 @@ cv::Mat PlannerNode::preprocess_depth_image(const sm::Image::SharedPtr depth_msg
 pointcloud_type* PlannerNode::create_point_cloud(const sm::Image::SharedPtr depth_msg)
 {
   cv::Mat depth_mat = preprocess_depth_image(depth_msg);
-  double fy, fx, cx, cy;
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    cx = depth_mat.cols / 2.0f;
-    cy = depth_mat.rows / 2.0f;
-    fy = (depth_mat.rows / 2) / std::tan(M_PI * _flightmare_fov / 180.0 / 2.0);
-    fx = fy;
-  } else if (_runtime_mode == RuntimeModes::MAVROS) {
-    cx = _real_cx;
-    cy = _real_cy;
-    fx = fy = _real_focal_length;
-  }
+  
+  // Use camera intrinsics from config (unified for both modes)
+  double cx = _real_cx;
+  double cy = _real_cy;
+  double fx = _real_focal_length;
+  double fy = _real_focal_length;
 
   pointcloud_type* cloud (new pointcloud_type());
   cloud->header.stamp     = rclcpp::Time(depth_msg->header.stamp).nanoseconds() / 1000;
@@ -137,18 +137,40 @@ pointcloud_type* PlannerNode::create_point_cloud(const sm::Image::SharedPtr dept
       pt.x = Z;
     }
   }
+    
   return cloud;
 }
 
-void PlannerNode::start_callback(const std_msgs::msg::Empty::SharedPtr msg) {
-  (void)msg;  // Suppress unused parameter warning
-  RCLCPP_WARN(this->get_logger(), "Planner: Start publishing commands!");
-  set_auto_pilot_state_forced(PlanningStates::START);
-  steering_value = 0.0f;
-  _steered = false;
-  trajectory_queue_.clear();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received mission command: %s", msg->mission_name.c_str());
+  
+  if (mission_received_) {
+    RCLCPP_WARN(this->get_logger(), "Mission already received, ignoring duplicate");
+    return;
+  }
+  
+  // Set goal coordinates
+  _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
+  _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
+  _goal_in_world_frame.z = _goal_up_coordinate;
+  RCLCPP_INFO(this->get_logger(), "Setting goal to (%.2f, %.2f, %.2f)",
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
+  _goal_set = true;
+  mission_received_ = true;
+  
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Simulation mode: directly start trajectory control
+    RCLCPP_WARN(this->get_logger(), "[SIM] Starting navigation!");
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
+    RCLCPP_WARN(this->get_logger(), "[MAVROS] Mission received, initiating flight sequence...");
+  }
 }
 
 void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
@@ -157,9 +179,12 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   set_auto_pilot_state_forced(PlanningStates::OFF);
   steering_value = 0.0f;
   _steered = false;
-  if (_runtime_mode == RuntimeModes::MAVROS) {
-    _goal_set = false;
-  }
+  _goal_set = false;
+  mission_received_ = false;
+  mode_switch_pending_ = false;
+  arming_pending_ = false;
+  takeoff_pending_ = false;
+  land_pending_ = false;
   trajectory_queue_.clear();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
@@ -205,6 +230,23 @@ void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg
   _state.pose = msg->pose.pose;
   _state.velocity = msg->twist.twist;
   // Note: acceleration can be computed from velocity if needed, but not used in MIDI method
+
+  // Debug: Log odometry reception periodically
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //   "Odometry received: pos=(%.2f, %.2f, %.2f)",
+  //   msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
+
+  // Publish TF transform (world_frame -> vehicle_frame) from odometry
+  // This allows MIDI to use TF internally without relying on external TF publishers
+  geometry_msgs::msg::TransformStamped tf_msg;
+  tf_msg.header.stamp = msg->header.stamp;
+  tf_msg.header.frame_id = _world_frame;
+  tf_msg.child_frame_id = _vehicle_frame;
+  tf_msg.transform.translation.x = msg->pose.pose.position.x;
+  tf_msg.transform.translation.y = msg->pose.pose.position.y;
+  tf_msg.transform.translation.z = msg->pose.pose.position.z;
+  tf_msg.transform.rotation = msg->pose.pose.orientation;
+  tf_broadcaster_->sendTransform(tf_msg);
 }
 
 void PlannerNode::update_reference_trajectory() {
@@ -244,31 +286,93 @@ void PlannerNode::control_loop() {
 }
 
 void PlannerNode::update_planner_state() {
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF &&
-      flight_controller_status.mode == "GUIDED" && flight_controller_status.armed) {
-    auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
-    request->altitude = _goal_in_world_frame.z;
-
-    if (takeoff_srv->service_is_ready()) {
-      auto result = takeoff_srv->async_send_request(request);
-      if (result.valid()) {
-        set_auto_pilot_state_forced(PlanningStates::START);
-        RCLCPP_WARN(this->get_logger(), "Taken off!");
+  // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
+  if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Step 1: Switch to GUIDED mode if not already
+    if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
+      if (mode_srv->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
+        request->custom_mode = "GUIDED";
+        mode_switch_pending_ = true;
+        
+        mode_srv->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
+            mode_switch_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->mode_sent) {
+                RCLCPP_INFO(this->get_logger(), "GUIDED mode request sent");
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Failed to send GUIDED mode request");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Mode switch service failed: %s", e.what());
+            }
+          });
+      }
+      return;  // Wait for mode switch
+    }
+    
+    // Step 2: Arm if in GUIDED but not armed
+    if (flight_controller_status.mode == "GUIDED" && !flight_controller_status.armed && !arming_pending_) {
+      if (arming_srv->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
+        request->value = true;
+        arming_pending_ = true;
+        
+        arming_srv->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
+            arming_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->success) {
+                RCLCPP_INFO(this->get_logger(), "Arming command accepted");
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Arming command rejected");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Arming service failed: %s", e.what());
+            }
+          });
+      }
+      return;  // Wait for arming
+    }
+    
+    // Step 3: Takeoff if armed
+    if (flight_controller_status.mode == "GUIDED" && flight_controller_status.armed && !takeoff_pending_) {
+      if (takeoff_srv->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+        request->altitude = _goal_in_world_frame.z;
+        takeoff_pending_ = true;
+        
+        takeoff_srv->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
+            takeoff_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->success) {
+                RCLCPP_WARN(this->get_logger(), "Takeoff command accepted!");
+                set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Takeoff command rejected by FCU");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Takeoff service failed: %s", e.what());
+            }
+          });
       }
     }
-
-    if (!_goal_set) {
-      _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
-      _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
-      _goal_in_world_frame.z = _goal_up_coordinate;
-      RCLCPP_WARN(this->get_logger(), "Setting goal to (%.2f, %.2f, %.2f)",
-                 _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
-      _goal_set = true;
-    }
+    return;  // Don't proceed with other state logic while waiting for FC
   }
 
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state != PlanningStates::OFF && !flight_controller_status.armed)
+  // Handle disarm detection (for real FC)
+  if (_runtime_mode == RuntimeModes::MAVROS && 
+      _planner_state != PlanningStates::OFF &&
+      !flight_controller_status.armed) {
+    RCLCPP_WARN(this->get_logger(), "Vehicle disarmed, resetting planner");
     reset_callback(nullptr);
+    return;
+  }
 
   if (!_goal_set) return;
 
@@ -276,35 +380,59 @@ void PlannerNode::update_planner_state() {
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
 
-  if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::START) {
+  // Transition from START to TRAJECTORY_CONTROL when altitude reached
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Current altitude: %.2f, Goal altitude: %.2f", _state.pose.position.z, _goal_in_world_frame.z);
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Current planner state: %d", static_cast<int>(_planner_state));
+  if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::TAKING_OFF) {
+    // RCLCPP_INFO(this->get_logger(), "New state!");
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
   }
+  // Transition to GO_TO_GOAL when near goal
   else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL &&
            (distance_to_goal < _go_to_goal_threshold ||
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
     set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
     _stop_planning_point_in_world_frame = _state.pose.position;
-  } else if (_runtime_mode == RuntimeModes::MAVROS &&
-             _planner_state == PlanningStates::GO_TO_GOAL &&
-             distance_to_goal < _go_to_goal_threshold * 0.2) {
-    auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+  }
+  // Land when at goal (MAVROS only)
+  else if (_runtime_mode == RuntimeModes::MAVROS &&
+           _planner_state == PlanningStates::GO_TO_GOAL &&
+           distance_to_goal < _go_to_goal_threshold * 0.2 &&
+           !land_pending_) {
     if (land_srv->service_is_ready()) {
-      auto result = land_srv->async_send_request(request);
-      if (result.valid()) {
-        set_auto_pilot_state_forced(PlanningStates::LAND);
-        RCLCPP_WARN(this->get_logger(), "Landing!");
-      }
+      auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+      land_pending_ = true;
+      
+      land_srv->async_send_request(request,
+        [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
+          land_pending_ = false;
+          try {
+            auto response = future.get();
+            if (response->success) {
+              set_auto_pilot_state_forced(PlanningStates::LAND);
+              RCLCPP_WARN(this->get_logger(), "Land command accepted!");
+            } else {
+              RCLCPP_ERROR(this->get_logger(), "Land command rejected by FCU");
+            }
+          } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Land service failed: %s", e.what());
+          }
+        });
     }
-  } else if (_runtime_mode == RuntimeModes::MAVROS &&
-             _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
+  }
+  // Reset after landing complete
+  else if (_runtime_mode == RuntimeModes::MAVROS &&
+           _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
     reset_callback(nullptr);
   }
 }
 
 void PlannerNode::track_trajectory() {
+  // Don't track trajectory in non-flight states
   if (_planner_state == PlanningStates::LAND ||
-      _planner_state == PlanningStates::OFF || !_goal_set)
+      _planner_state == PlanningStates::OFF ||
+      !_goal_set)
     return;
   if (!had_reference_trajectory && _runtime_mode == RuntimeModes::MAVROS)
     return;
@@ -314,7 +442,7 @@ void PlannerNode::track_trajectory() {
   rclcpp::Time command_execution_time = wall_time_now + rclcpp::Duration::from_seconds(control_command_delay);
 
   TrajectoryPoint reference_point;
-  if (_planner_state == PlanningStates::START) {
+  if (_planner_state == PlanningStates::TAKING_OFF) {
     _reference_trajectory_start_time = command_execution_time;
     steering_value = 0.0f;
     if (_runtime_mode == RuntimeModes::MAVROS)
@@ -454,8 +582,8 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
     case PlanningStates::OFF:
       state_name = "OFF";
       break;
-    case PlanningStates::START:
-      state_name = "START";
+    case PlanningStates::TAKING_OFF:
+      state_name = "TAKING_OFF";
       break;
     case PlanningStates::TRAJECTORY_CONTROL:
       state_name = "TRAJECTORY_CONTROL";
@@ -560,17 +688,16 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
                                      goal_in_camera_frame.point.z);
 
   cv::Mat depth_mat = preprocess_depth_image(depth_msg);
-  double cx, cy, fy;
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    cx = depth_mat.cols / 2.0f;
-    cy = depth_mat.rows / 2.0f;
-    fy = (depth_mat.rows / 2) / std::tan(M_PI * _flightmare_fov / 180.0 / 2.0);
-  } else if (_runtime_mode == RuntimeModes::MAVROS) {
-    cx = _real_cx;
-    cy = _real_cy;
-    fy = _real_focal_length;
-  }
+  
+  // Use camera intrinsics from config (unified for both modes)
+  double cx = _real_cx;
+  double cy = _real_cy;
+  double fy = _real_focal_length;
 
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+    "Camera params - fy: %.2f, cx: %.2f, cy: %.2f, cols: %d, rows: %d",
+    fy, cx, cy, depth_mat.cols, depth_mat.rows);
+  
   PinholeCamera camera(fy, cx, cy, depth_mat.cols, depth_mat.rows,
                        _depth_uncertainty_coeffs, _true_vehicle_radius,
                        _planning_vehicle_radius, _minimum_clear_distance);
@@ -613,10 +740,29 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 }
 
 void PlannerNode::visualise(const sm::Image::SharedPtr depth_msg) {
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "Visualise callback: depth image %dx%d, encoding=%s",
+    depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
+
   pointcloud_type* cloud = create_point_cloud(depth_msg);
+  
+  // Count valid points
+  size_t valid_points = 0;
+  for (const auto& pt : cloud->points) {
+    if (!std::isnan(pt.x) && !std::isnan(pt.y) && !std::isnan(pt.z)) {
+      valid_points++;
+    }
+  }
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "Point cloud: %zu total points, %zu valid points, frame_id=%s",
+    cloud->points.size(), valid_points, cloud->header.frame_id.c_str());
+
   sm::PointCloud2 cloudMessage;
   pcl::toROSMsg(*cloud, cloudMessage);
   point_cloud_pub->publish(cloudMessage);
+  
+  // Clean up memory
+  delete cloud;
 
   visualization_msgs::msg::Marker goal_marker;
   goal_marker.header.frame_id = _world_frame;

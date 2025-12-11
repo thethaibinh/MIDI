@@ -27,6 +27,9 @@
   <!-- MAVROS for Ardupilot -->
   <depend>mavros_msgs</depend>
   
+  <!-- Ground system messages -->
+  <depend>ground_system_msgs</depend>
+  
   <!-- PCL -->
   <depend>pcl_conversions</depend>
   

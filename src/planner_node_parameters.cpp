@@ -48,9 +48,6 @@ bool PlannerNode::loadParameters() {
   std::string runtime_mode_str = planner_config["runtime_mode"].as<std::string>();
   if (runtime_mode_str == "omnidrones") {
     _runtime_mode = RuntimeModes::OMNIDRONES;
-    // Load OmniDrones FOV
-    _flightmare_fov = planner_config["omnidrones_fov"] ? 
-                      planner_config["omnidrones_fov"].as<double>() : 90.0;
   } else if (runtime_mode_str == "mavros") {
     _runtime_mode = RuntimeModes::MAVROS;
   }
@@ -88,11 +85,23 @@ bool PlannerNode::loadParameters() {
 
   // Depth camera parameters
   _depth_scale = planner_config["depth_camera"]["depth_scale"].as<double>();
+  
+  // Load camera intrinsics - used for both OmniDrones and MAVROS modes
+  double config_focal_length = planner_config["depth_camera"]["focal_length"].as<double>();
+  double config_cx = planner_config["depth_camera"]["cx"].as<double>();
+  double config_cy = planner_config["depth_camera"]["cy"].as<double>();
+  
   if (_runtime_mode == RuntimeModes::MAVROS) {
     _decimation_factor = planner_config["depth_camera"]["decimation_factor"].as<int>();
-    _real_focal_length = planner_config["depth_camera"]["focal_length"].as<double>() / _decimation_factor;
-    _real_cx = planner_config["depth_camera"]["cx"].as<double>() / _decimation_factor;
-    _real_cy = planner_config["depth_camera"]["cy"].as<double>() / _decimation_factor;
+    _real_focal_length = config_focal_length / _decimation_factor;
+    _real_cx = config_cx / _decimation_factor;
+    _real_cy = config_cy / _decimation_factor;
+  } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // For OmniDrones, use focal_length directly (already at simulated resolution)
+    _decimation_factor = 1;
+    _real_focal_length = config_focal_length;
+    _real_cx = config_cx;
+    _real_cy = config_cy;
   }
 
   std::vector<double> temp;
