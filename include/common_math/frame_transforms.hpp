@@ -106,6 +106,62 @@ inline void transform_camera_to_body(const geometry_msgs::msg::Point& camera_vec
   body_vector.z = -camera_vector.y;  // Down to Up
 }
 
+// ============================================================================
+// RFU Body Frame Transforms (for OmniDrones)
+// RFU: X=Right, Y=Forward, Z=Up
+// Camera RDF: X=Right, Y=Down, Z=Forward (mounted pointing along body +Y)
+// ============================================================================
+
+// RFU Body to Camera (RDF) - camera points along body +Y (forward)
+// Camera X (Right)   = Body X (Right)
+// Camera Y (Down)    = Body -Z (negative Up)
+// Camera Z (Forward) = Body Y (Forward)
+inline void transform_body_rfu_to_camera(const geometry_msgs::msg::Point& body_point,
+                                         geometry_msgs::msg::Point& camera_point) {
+  camera_point.x = body_point.x;   // Right stays Right
+  camera_point.y = -body_point.z;  // Up to Down (negated)
+  camera_point.z = body_point.y;   // Forward stays Forward
+}
+
+inline void transform_body_rfu_to_camera(const geometry_msgs::msg::Vector3& body_vector,
+                                         geometry_msgs::msg::Vector3& camera_vector) {
+  camera_vector.x = body_vector.x;   // Right stays Right
+  camera_vector.y = -body_vector.z;  // Up to Down (negated)
+  camera_vector.z = body_vector.y;   // Forward stays Forward
+}
+
+// Camera (RDF) to RFU Body - camera points along body +Y (forward)
+// Body X (Right)   = Camera X (Right)
+// Body Y (Forward) = Camera Z (Forward)
+// Body Z (Up)      = Camera -Y (negative Down)
+inline void transform_camera_to_body_rfu(const std::array<double, 3>& camera_point,
+                                         geometry_msgs::msg::Point& body_point) {
+  body_point.x = camera_point[0];   // Right stays Right
+  body_point.y = camera_point[2];   // Forward stays Forward
+  body_point.z = -camera_point[1];  // Down to Up (negated)
+}
+
+inline void transform_camera_to_body_rfu(const std::array<double, 3>& camera_vector,
+                                         geometry_msgs::msg::Vector3& body_vector) {
+  body_vector.x = camera_vector[0];   // Right stays Right
+  body_vector.y = camera_vector[2];   // Forward stays Forward
+  body_vector.z = -camera_vector[1];  // Down to Up (negated)
+}
+
+inline void transform_camera_to_body_rfu(const geometry_msgs::msg::Point& camera_point,
+                                         geometry_msgs::msg::Point& body_point) {
+  body_point.x = camera_point.x;   // Right stays Right
+  body_point.y = camera_point.z;   // Forward stays Forward
+  body_point.z = -camera_point.y;  // Down to Up (negated)
+}
+
+inline void transform_camera_to_body_rfu(const geometry_msgs::msg::Vector3& camera_vector,
+                                         geometry_msgs::msg::Vector3& body_vector) {
+  body_vector.x = camera_vector.x;   // Right stays Right
+  body_vector.y = camera_vector.z;   // Forward stays Forward
+  body_vector.z = -camera_vector.y;  // Down to Up (negated)
+}
+
 }  // namespace frame_transform
 
 #endif  // FRAME_TRANSFORM_H

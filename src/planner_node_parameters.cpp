@@ -76,11 +76,17 @@ bool PlannerNode::loadParameters() {
   _goal_up_coordinate = planner_config["goal_coordinate"]["up"].as<double>();
 
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // For OmniDrones, goal is in absolute ENU coordinates
-    _goal_in_world_frame.x = _goal_west_coordinate;   // X = East
-    _goal_in_world_frame.y = _goal_north_coordinate;  // Y = North
+    // OmniDrones uses NWU world frame (env rotated so obstacles face drone)
+    // NWU: X=North(forward), Y=West(left), Z=Up
+    // Drone body is FLU: X=Forward, Y=Left, Z=Up
+    // At yaw=0, body FLU aligns with world NWU
+    _goal_in_world_frame.x = _goal_north_coordinate;  // X = North = forward
+    _goal_in_world_frame.y = _goal_west_coordinate;   // Y = West = left
     _goal_in_world_frame.z = _goal_up_coordinate;     // Z = Up
     _goal_set = true;
+    RCLCPP_INFO(this->get_logger(), "OmniDrones goal: north=%.1f, west=%.1f, up=%.1f -> NWU (%.1f, %.1f, %.1f)",
+                _goal_north_coordinate, _goal_west_coordinate, _goal_up_coordinate,
+                _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
   }
 
   // Depth camera parameters

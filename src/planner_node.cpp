@@ -239,10 +239,18 @@ void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg
   _state.velocity = msg->twist.twist;
   // Note: acceleration can be computed from velocity if needed, but not used in MIDI method
 
-  // Debug: Log odometry reception periodically
-  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-  //   "Odometry received: pos=(%.2f, %.2f, %.2f)",
-  //   msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
+  // Debug: Log odometry with yaw periodically
+  // Convert quaternion to yaw (rotation around Z axis)
+  double qw = msg->pose.pose.orientation.w;
+  double qx = msg->pose.pose.orientation.x;
+  double qy = msg->pose.pose.orientation.y;
+  double qz = msg->pose.pose.orientation.z;
+  double yaw_rad = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  double yaw_deg = yaw_rad * 180.0 / M_PI;
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "Odometry: pos=(%.2f, %.2f, %.2f), yaw=%.1f deg (%.2f rad)",
+    msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z,
+    yaw_deg, yaw_rad);
 
   // Publish TF transform (world_frame -> vehicle_frame) from odometry
   // This allows MIDI to use TF internally without relying on external TF publishers
@@ -546,6 +554,9 @@ void PlannerNode::get_reference_point_at_time(
   geometry_msgs::msg::Vector3 velocity_in_body_frame, velocity_in_world_frame,
     acceleration_in_body_frame, acceleration_in_world_frame, jerk_in_body_frame, jerk_in_world_frame;
 
+  // Transform from camera frame (RDF) to body frame (FLU)
+  // Camera RDF: X=Right, Y=Down, Z=Forward
+  // Body FLU: X=Forward, Y=Left, Z=Up
   frame_transform::transform_camera_to_body(position_in_camera_frame, position_in_body_frame);
   frame_transform::transform_camera_to_body(velocity_in_camera_frame, velocity_in_body_frame);
   frame_transform::transform_camera_to_body(acceleration_in_camera_frame, acceleration_in_body_frame);
@@ -665,6 +676,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
+  // Transform from body frame (FLU) to camera frame (RDF)
   frame_transform::transform_body_to_camera(velocity_body_frame, velocity_camera_frame);
   if (_collision_checking_method == CollisionCheckingMethod::PYRAMID) {
     frame_transform::transform_body_to_camera(acceleration_body_frame, acceleration_camera_frame);
@@ -690,6 +702,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   } catch (tf2::TransformException& ex) {
     RCLCPP_WARN(this->get_logger(), "Transform failure: %s", ex.what());
   }
+  // Transform goal from body (FLU) to camera frame (RDF)
   frame_transform::transform_body_to_camera(goal_in_body_frame.point, goal_in_camera_frame.point);
   Eigen::Vector3d exploration_vector(goal_in_camera_frame.point.x,
                                      goal_in_camera_frame.point.y,

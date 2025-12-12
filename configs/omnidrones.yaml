@@ -10,12 +10,14 @@ vehicle_frame_name: "base_link"  # MIDI publishes TF internally from odometry
 topics:
   depth: "camera/depth/image_raw"
 
-# Goal coordinates (in NWU world frame, relative to start position)
-# NWU: X=North, Y=West, Z=Up
+# Goal coordinates (NWU world frame with FLU body frame)
+# Environment is rotated so obstacles face the drone
+# NWU: X=North(forward), Y=West(left), Z=Up
+# Drone body FLU aligns with world NWU at yaw=0
 goal_coordinate:
-  north: 20.0   # North (meters in NWU X direction)
-  west: 0.0     # West (meters in NWU Y direction)
-  up: 3.0       # Up (meters in NWU Z direction)
+  north: 20.0   # Forward distance (meters, maps to +X in NWU)
+  west: 0.0     # Left distance (meters, maps to +Y in NWU)
+  up: 3.0       # Altitude (meters, maps to +Z in NWU)
 
 # Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
 # Native: 1280x800, HFOV 127°, VFOV 79.5°
