@@ -793,7 +793,10 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 
   // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
   //   "find_lowest_cost_trajectory SUCCESS - opt_traj duration=%.4f", opt_traj.get_duration());
-
+  // Assign transforms BEFORE validation so get_initial_position_in_world_frame() works correctly
+  opt_traj.assign_body_to_world_transform(body_to_world);
+  opt_traj.assign_world_to_body_transform(world_to_body);
+  
   if (!check_valid_trajectory(position_world_frame, opt_traj)) {
     // RCLCPP_WARN(this->get_logger(), "check_valid_trajectory REJECTED trajectory");
     return;
@@ -805,10 +808,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   {
     const std::lock_guard<std::mutex> lock(trajectory_mutex_);
     steering_value = 0.0f;
-    _steered = false;
-  // Assign transforms BEFORE validation so get_initial_position_in_world_frame() works correctly
-    opt_traj.assign_body_to_world_transform(body_to_world);
-    opt_traj.assign_world_to_body_transform(world_to_body);    
+    _steered = false;    
     trajectory_queue_.push_back(opt_traj);
   }
 }
