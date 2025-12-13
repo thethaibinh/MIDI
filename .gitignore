@@ -5,3 +5,6 @@ evaluation.yaml
 *.cproject
 **/.settings
 **/.vscode
+build/
+install/
+log/

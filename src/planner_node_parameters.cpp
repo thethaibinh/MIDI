@@ -2,7 +2,7 @@
 
 bool PlannerNode::loadParameters() {
   // Load trajectory tracking controller parameters
-  if (!base_controller_params_.loadParameters(pnh_)) return false;
+  if (!base_controller_params_.loadParameters(this->shared_from_this())) return false;
 
   // Load sim parameters
   std::string sim_config_path = std::string(getenv("FLIGHTMARE_PATH")) +
@@ -10,24 +10,27 @@ bool PlannerNode::loadParameters() {
   YAML::Node sim_config = YAML::LoadFile(sim_config_path);
   // Load fov from Flightmare sim config
   if (!sim_config["rgb_camera"]) {
-    ROS_WARN("RGB camera not found in sim config file");
+    RCLCPP_WARN(this->get_logger(), "RGB camera not found in sim config file");
     return false;
   }
   _flightmare_fov = sim_config["rgb_camera"]["fov"].as<double>();
 
   // Load scenario parameters
   std::string scenario_str;
-  if (!quadrotor_common::getParam("scenario", scenario_str, pnh_))
+  this->declare_parameter<std::string>("scenario", "sim");
+  if (!this->get_parameter("scenario", scenario_str)) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to get 'scenario' parameter");
     return false;
+  }
   const std::string planner_config_path = std::string(getenv("PLANNER_PATH")) + "/configs/" + scenario_str + ".yaml";
 
   // Load planner parameters
   YAML::Node planner_config = YAML::LoadFile(planner_config_path);
   if (!planner_config) {
-    ROS_WARN("Planning config file not found");
+    RCLCPP_WARN(this->get_logger(), "Planning config file not found");
     return false;
   }
-  ROS_WARN("Planner config file: %s", planner_config_path.c_str());
+  RCLCPP_WARN(this->get_logger(), "Planner config file: %s", planner_config_path.c_str());
   // Scenario parameters
   // Runtime mode
   std::string runtime_mode_str = planner_config["runtime_mode"].as<std::string>();

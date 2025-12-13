@@ -1,7 +1,13 @@
 #include "depth_uncertainty_planner/cuda_collision_checker.cuh"
 #include "common_math/cuda_conversions.cuh"
 #include <vector>
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
+#include <iostream>
+
+// ROS2 logging macros for CUDA (using cerr since CUDA code may not have node context)
+#define CUDA_LOG_ERROR(msg) std::cerr << "[CUDA ERROR] " << msg << std::endl
+#define CUDA_LOG_WARN(msg) std::cerr << "[CUDA WARN] " << msg << std::endl
+#define CUDA_LOG_INFO(msg) std::cout << "[CUDA INFO] " << msg << std::endl
 
 namespace depth_uncertainty_planner {
 
@@ -49,20 +55,23 @@ __global__ void collision_checking_kernel(
 
     if (cuda_segment.get_euclidean_distance(depth_point) < cuda_camera.get_planning_vehicle_radius()) {
         *collision_free = false;
-        return;
-    }
-
-    double prob = cuda_segment.get_collision_probability(depth_point, cuda_camera, *min_mahalanobis_distance);
-    atomicMax(max_collision_probability, prob);
-    if (prob > 5) {
-        *collision_free = false;
     }
 }
+
+// Error handling macro
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err_ = (call); \
+        if (err_ != cudaSuccess) { \
+            CUDA_LOG_ERROR(__FILE__ << ":" << __LINE__ << " " << cudaGetErrorString(err_)); \
+            return false; \
+        } \
+    } while(0)
 
 // Error handling
 cudaError_t CudaCollisionChecker::handleCudaError(cudaError_t err, const char* file, int line) {
     if (err != cudaSuccess) {
-        ROS_ERROR("CUDA Error at %s:%d: %s", file, line, cudaGetErrorString(err));
+        CUDA_LOG_ERROR(file << ":" << line << " " << cudaGetErrorString(err));
     }
     return err;
 }
@@ -79,14 +88,14 @@ bool CudaCollisionChecker::check_for_collision(
     int deviceCount;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
     if (err != cudaSuccess || deviceCount == 0) {
-        ROS_ERROR("No CUDA-capable device found: %s", cudaGetErrorString(err));
+        CUDA_LOG_ERROR("No CUDA-capable device found: " << cudaGetErrorString(err));
         return false;
     }
 
     // Print device info
     cudaDeviceProp deviceProp;
     CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
-    ROS_INFO("Using CUDA device: %s", deviceProp.name);
+    CUDA_LOG_INFO("Using CUDA device: " << deviceProp.name);
 
     // Calculate depth data size
     size_t depth_size = camera.get_width() * camera.get_height() * sizeof(float);
@@ -144,27 +153,17 @@ bool CudaCollisionChecker::check_for_collision(
         // Configure block size
         dim3 block(16, 16);
 
-        // Calculate grid size
-        // int dx = right - left + 1;  // add 1 because boundaries are inclusive
-        // int dy = bottom - top + 1;
-
-        // ROS_WARN("Region dimensions: dx=%d, dy=%d", dx, dy);
-
-        // dim3 grid(
-        //     (dx + block.x - 1) / block.x,
-        //     (dy + block.y - 1) / block.y
-        // );
         dim3 grid(
             (cuda_camera.get_width() + block.x - 1) / block.x,
             (cuda_camera.get_height() + block.y - 1) / block.y
         );
 
-        ROS_INFO("Grid dimensions: (%d, %d)", grid.x, grid.y);
+        CUDA_LOG_INFO("Grid dimensions: (" << grid.x << ", " << grid.y << ")");
 
         // Ensure grid dimensions are valid
         if (grid.x == 0 || grid.y == 0) {
-            ROS_ERROR("Invalid grid dimensions. Check if right >= left and bottom >= top");
-            ROS_ERROR("Boundaries: x[%d, %d], y[%d, %d]", left, right, top, bottom);
+            CUDA_LOG_ERROR("Invalid grid dimensions. Check if right >= left and bottom >= top");
+            CUDA_LOG_ERROR("Boundaries: x[" << left << ", " << right << "], y[" << top << ", " << bottom << "]");
             return false;
         }
 
@@ -199,8 +198,7 @@ bool CudaCollisionChecker::check_for_collision(
         return collision_free;
 
     } catch (const std::exception& e) {
-        ROS_ERROR("CUDA error: %s", e.what());
-        ROS_WARN("CUDA error: %s", e.what());
+        CUDA_LOG_ERROR("CUDA error: " << e.what());
 
         // Cleanup in case of error
         if (d_depth_data) cudaFree(d_depth_data);

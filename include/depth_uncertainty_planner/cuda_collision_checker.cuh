@@ -3,6 +3,7 @@
 #include "common_math/segment2.hpp"
 #include "common_math/pinhole_camera_model.hpp"
 #include <cuda_runtime.h>
+#include <iostream>
 
 namespace depth_uncertainty_planner {
 
@@ -22,7 +23,7 @@ private:
 #define CUDA_CHECK(err) do { \
     cudaError_t err_ = (err); \
     if (err_ != cudaSuccess) { \
-        ROS_ERROR("CUDA Error at %s:%d: %s", __FILE__, __LINE__, cudaGetErrorString(err_)); \
+        std::cerr << "[ERROR] CUDA Error at " << __FILE__ << ":" << __LINE__ << ": " << cudaGetErrorString(err_) << std::endl; \
         return false; \
     } \
 } while(0)

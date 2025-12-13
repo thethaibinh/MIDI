@@ -114,11 +114,11 @@ bool DuPlanner::find_lowest_cost_trajectory(
     // Calculate the trajectory in an offline manner (outside of the control loop)
     result = otg.calculate(initial_state, candidate_trajectory);
     if (result == ruckig::Result::ErrorInvalidInput) {
-      ROS_WARN("Invalid input");
+      std::cerr << "[WARN] Invalid input" << std::endl;
       continue;
     }
     if (result != ruckig::Result::Working) {
-      ROS_WARN("Something else!");
+      std::cerr << "[WARN] Something else!" << std::endl;
       continue;
     }
     _num_trajectories_generated++;
@@ -168,8 +168,7 @@ bool DuPlanner::find_lowest_cost_trajectory(
     }
   }
   if (_debug_num_trajectories) {
-    ROS_WARN("sampled: %d, checked: %d, free: %d", _num_trajectories_sampled,
-             _num_collision_checked, _num_collision_free);
+    std::cerr << "[WARN] sampled: " << _num_trajectories_sampled << ", checked: " << _num_collision_checked << ", free: " << _num_collision_free << std::endl;
   }
   if (feasible_trajectory_found &&
       (_num_collision_checked > _checked_trajectories_threshold ||
@@ -432,7 +431,7 @@ bool DuPlanner::is_cuda_segment2_collision_free(const CudaSecondOrderSegment* or
 
   if (left < 0 || right > cuda_camera.get_width() || top < 0 ||
       bottom > cuda_camera.get_height()) {
-    ROS_ERROR("Boundary out of frame");
+    std::cerr << "[ERROR] Boundary out of frame" << std::endl;
     return false;
   }
 
