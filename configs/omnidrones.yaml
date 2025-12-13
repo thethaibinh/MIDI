@@ -21,18 +21,17 @@ goal_coordinate:
 
 # Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
 # Native: 1280x800, HFOV 127°, VFOV 79.5°
-# Simulated: 640x400 (2x decimation)
+# Simulated: 320x200 (4x decimation)
 #
 # Isaac Sim camera intrinsics:
-#   fx = focal_length_mm * width / horizontal_aperture_mm
-#   fx = 24 * 640 / 96.7 = 158.8 pixels
+#   fx = (width/2) / tan(HFOV/2) = 160 / tan(63.5°) = 79.45 pixels
 #
 depth_camera:
   depth_scale: 1.0  # OmniDrones publishes 32FC1 in meters
   decimation_factor: 1  # Already decimated in OmniDrones
-  focal_length: 158.8   # fx = 24mm * 640px / 96.7mm (matches OmniDrones simulation)
-  cx: 320.0             # Principal point x (image center x = width/2)
-  cy: 200.0             # Principal point y (image center y = height/2)
+  focal_length: 79.45   # fx = 160 / tan(63.5°) (matches OmniDrones 320x200)
+  cx: 160.0             # Principal point x (image center x = width/2)
+  cy: 100.0             # Principal point y (image center y = height/2)
   depth_uncertainty:
     ca0: 0.001
     ca1: 0.0007
@@ -43,37 +42,44 @@ depth_camera:
 
 # Planning parameters
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
-checking_time_ratio: 0.6
+checking_time_ratio: 0.9
 acc_planning_threshold: 0.1
-sampled_trajectories_threshold: 10000
-checked_trajectories_threshold: 200
+sampled_trajectories_threshold: 5    # Lowered for OmniDrones simulation
+checked_trajectories_threshold: 3    # Lowered - accept trajectory once we have 3 checked
 3d_planning: no                     # Use 2D planning
 2d_z_margin: 0.5
 traveling_cost: "distance"          # "direction" or "distance"
 replan_factor: 3.0
-debug_num_trajectories: no
+debug_num_trajectories: yes
 collision_probability_threshold: 5
-openmp_chunk_size: 16
+openmp_chunk_size: 64              # Optimized: 320x200/12threads ≈ 5333 pixels, chunk=64 for good load balance
 
 # Collision checking parameters (adjust based on your drone size)
-true_vehicle_radius: 0.25           # Actual radius including propellers (m)
-planning_vehicle_radius: 0.45       # Safety margin for planning (m)
-minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
+true_vehicle_radius: 0.18           # Actual radius including propellers (m)
+planning_vehicle_radius: 0.4       # Safety margin for planning (m)
+minimum_clear_distance: 1.2         # Min clearance from obstacles (m)
 
 # SSTO trajectory generation parameters
-depth_upper_bound: 5.0              # Max depth to plan ahead (m)
-depth_lower_bound: 1.5              # Min depth to plan ahead (m)
+depth_upper_bound: 5.5              # Max depth to plan ahead (m)
+depth_lower_bound: 1.7              # Min depth to plan ahead (m)
 depth_sampling_margin: 0.3
 is_spiral_sampling: no
 spiral_sampling_step: 3
 
 # Kinematic constraints (adjust based on drone capabilities)
-max_velocity_x: 2.0                 # Forward velocity (m/s)
-max_velocity_y: 1.0                 # Lateral velocity (m/s)
-max_velocity_z: 1.5                 # Vertical velocity (m/s)
-max_acceleration_x: 3.0             # Forward acceleration (m/s²)
-max_acceleration_y: 2.0             # Lateral acceleration (m/s²)
-max_acceleration_z: 2.0             # Vertical acceleration (m/s²)
+# max_velocity_x: 2.0                 # Forward velocity (m/s)
+# max_velocity_y: 1.0                 # Lateral velocity (m/s)
+# max_velocity_z: 1.0                 # Vertical velocity (m/s)
+# max_acceleration_x: 2.0             # Forward acceleration (m/s²)
+# max_acceleration_y: 1.0             # Lateral acceleration (m/s²)
+# max_acceleration_z: 1.0             # Vertical acceleration (m/s²)
+
+max_velocity_x: 2.0
+max_velocity_y: 1.5
+max_velocity_z: 2.0
+max_acceleration_x: 6.0
+max_acceleration_y: 3.0
+max_acceleration_z: 4.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)

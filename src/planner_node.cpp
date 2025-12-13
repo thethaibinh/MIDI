@@ -170,6 +170,7 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     // Simulation mode: directly start trajectory control
     RCLCPP_WARN(this->get_logger(), "[SIM] Starting navigation!");
     set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    _home_in_world_frame = _state.pose.position;
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
@@ -457,16 +458,21 @@ void PlannerNode::track_trajectory() {
   rclcpp::Time wall_time_now = this->now();
   rclcpp::Time command_execution_time = wall_time_now + rclcpp::Duration::from_seconds(control_command_delay);
 
+  // Initialize reference_point with current state to avoid uninitialized values
   TrajectoryPoint reference_point;
+  reference_point.position = geometryToEigen(_state.pose.position);
+  reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+  reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+  reference_point.heading = 0.0;
+
   if (_planner_state == PlanningStates::TAKING_OFF) {
     _reference_trajectory_start_time = command_execution_time;
     steering_value = 0.0f;
     if (_runtime_mode == RuntimeModes::MAVROS)
       return;
     if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-      reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
-      reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
-      reference_point.position = Eigen::Vector3d(0.0, 0.0, _goal_in_world_frame.z);
+      // Takeoff to goal altitude at current XY position
+      reference_point.position = Eigen::Vector3d(_home_in_world_frame.x, _home_in_world_frame.y, _goal_in_world_frame.z);
     }
   } else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL) {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
@@ -512,7 +518,7 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   msg.acceleration_or_force.x = reference_point.acceleration(0);
   msg.acceleration_or_force.y = reference_point.acceleration(1);
   msg.acceleration_or_force.z = reference_point.acceleration(2);
-  msg.yaw = M_PI_2;
+  msg.yaw = 0.0;
   raw_ref_pos_pub->publish(msg);
 }
 
@@ -543,12 +549,24 @@ void PlannerNode::get_reference_point_at_time(
   geometry_msgs::msg::TransformStamped body_to_world =
     reference_trajectory.get_transform_to_world();
 
+  // Debug: Check if transform is valid
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //   "get_reference_point_at_time: body_to_world translation=[%.4f, %.4f, %.4f]",
+  //   body_to_world.transform.translation.x,
+  //   body_to_world.transform.translation.y,
+  //   body_to_world.transform.translation.z);
+
   std::array<double, 3> position_in_camera_frame, velocity_in_camera_frame,
     acceleration_in_camera_frame, jerk_in_camera_frame;
   size_t num_section;
   reference_trajectory.at_time(
     point_time, position_in_camera_frame, velocity_in_camera_frame,
     acceleration_in_camera_frame, jerk_in_camera_frame, num_section);
+
+  // Debug: Log position in camera frame
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //   "  pos_camera_frame=[%.4f, %.4f, %.4f]",
+  //   position_in_camera_frame[0], position_in_camera_frame[1], position_in_camera_frame[2]);
 
   geometry_msgs::msg::Point position_in_body_frame, position_in_world_frame;
   geometry_msgs::msg::Vector3 velocity_in_body_frame, velocity_in_world_frame,
@@ -624,8 +642,17 @@ bool PlannerNode::check_valid_trajectory(
     RCLCPP_WARN(this->get_logger(), "The received trajectory is empty, rejecting it!");
     return false;
   }
+  
+  geometry_msgs::msg::Point traj_initial_pos = trajectory.get_initial_position_in_world_frame();
   double pos_diff = (geometryToEigen(current_position) -
-                     geometryToEigen(trajectory.get_initial_position_in_world_frame())).norm();
+                     geometryToEigen(traj_initial_pos)).norm();
+  
+  // RCLCPP_INFO(this->get_logger(),
+  //   "check_valid_trajectory: current_pos=[%.4f, %.4f, %.4f], traj_initial=[%.4f, %.4f, %.4f], diff=%.4f, tolerance=%.4f",
+  //   current_position.x, current_position.y, current_position.z,
+  //   traj_initial_pos.x, traj_initial_pos.y, traj_initial_pos.z,
+  //   pos_diff, kPositionJumpTolerance_);
+  
   if (pos_diff > kPositionJumpTolerance_) {
     RCLCPP_WARN(this->get_logger(),
       "The received trajectory does not start at current position, rejecting it!");
@@ -704,6 +731,14 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   }
   // Transform goal from body (FLU) to camera frame (RDF)
   frame_transform::transform_body_to_camera(goal_in_body_frame.point, goal_in_camera_frame.point);
+  
+  // Debug: Log all frame transforms
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //   "Goal transforms - world=[%.2f,%.2f,%.2f] body=[%.2f,%.2f,%.2f] camera=[%.2f,%.2f,%.2f]",
+  //   goal_in_world_frame.point.x, goal_in_world_frame.point.y, goal_in_world_frame.point.z,
+  //   goal_in_body_frame.point.x, goal_in_body_frame.point.y, goal_in_body_frame.point.z,
+  //   goal_in_camera_frame.point.x, goal_in_camera_frame.point.y, goal_in_camera_frame.point.z);
+  
   Eigen::Vector3d exploration_vector(goal_in_camera_frame.point.x,
                                      goal_in_camera_frame.point.y,
                                      goal_in_camera_frame.point.z);
@@ -735,10 +770,18 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   ruckig::Trajectory<3> opt_traj;
 
   ExplorationCost exploration_cost(exploration_vector, _traveling_cost);
+  
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //   "img_callback: exploration_vector=[%.2f, %.2f, %.2f], depth_mat size=%dx%d",
+  //   exploration_vector[0], exploration_vector[1], exploration_vector[2],
+  //   depth_mat.cols, depth_mat.rows);
+
   if (!planner.find_lowest_cost_trajectory(
         initial_state_camera_frame, opt_traj, trajectory_sampler,
         _planning_cycle_time, &exploration_cost,
         &ExplorationCost::get_cost_wrapper)) {
+    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    //   "find_lowest_cost_trajectory FAILED - no valid trajectory found");
     if ((this->now() - _reference_trajectory_start_time).seconds() > 2.5 &&
         _planner_state == PlanningStates::TRAJECTORY_CONTROL && !_steered) {
       const std::lock_guard<std::mutex> lock(trajectory_mutex_);
@@ -748,22 +791,32 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     return;
   }
 
-  if (!check_valid_trajectory(position_world_frame, opt_traj)) return;
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //   "find_lowest_cost_trajectory SUCCESS - opt_traj duration=%.4f", opt_traj.get_duration());
+
+  if (!check_valid_trajectory(position_world_frame, opt_traj)) {
+    // RCLCPP_WARN(this->get_logger(), "check_valid_trajectory REJECTED trajectory");
+    return;
+  }
+
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    "Trajectory ACCEPTED, adding to queue (queue size before: %zu)", trajectory_queue_.size());
 
   {
     const std::lock_guard<std::mutex> lock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
+  // Assign transforms BEFORE validation so get_initial_position_in_world_frame() works correctly
     opt_traj.assign_body_to_world_transform(body_to_world);
-    opt_traj.assign_world_to_body_transform(world_to_body);
+    opt_traj.assign_world_to_body_transform(world_to_body);    
     trajectory_queue_.push_back(opt_traj);
   }
 }
 
 void PlannerNode::visualise(const sm::Image::SharedPtr depth_msg) {
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "Visualise callback: depth image %dx%d, encoding=%s",
-    depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //   "Visualise callback: depth image %dx%d, encoding=%s",
+  //   depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
 
   pointcloud_type* cloud = create_point_cloud(depth_msg);
   
@@ -774,9 +827,9 @@ void PlannerNode::visualise(const sm::Image::SharedPtr depth_msg) {
       valid_points++;
     }
   }
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "Point cloud: %zu total points, %zu valid points, frame_id=%s",
-    cloud->points.size(), valid_points, cloud->header.frame_id.c_str());
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //   "Point cloud: %zu total points, %zu valid points, frame_id=%s",
+  //   cloud->points.size(), valid_points, cloud->header.frame_id.c_str());
 
   sm::PointCloud2 cloudMessage;
   pcl::toROSMsg(*cloud, cloudMessage);
@@ -785,25 +838,64 @@ void PlannerNode::visualise(const sm::Image::SharedPtr depth_msg) {
   // Clean up memory
   delete cloud;
 
-  visualization_msgs::msg::Marker goal_marker;
-  goal_marker.header.frame_id = _world_frame;
-  goal_marker.header.stamp = this->now();
-  goal_marker.ns = "visualization";
+  // Visualization markers
+  visualization_msgs::msg::Marker polynomial_trajectory, goal_marker;
+  polynomial_trajectory.header.frame_id = goal_marker.header.frame_id = _world_frame;
+  polynomial_trajectory.header.stamp = goal_marker.header.stamp = this->now();
+  polynomial_trajectory.ns = goal_marker.ns = "visualization";
+  polynomial_trajectory.action = visualization_msgs::msg::Marker::ADD;
   goal_marker.action = visualization_msgs::msg::Marker::ADD;
-  goal_marker.pose.orientation.w = 1.0;
+  polynomial_trajectory.pose.orientation.w = goal_marker.pose.orientation.w = 1.0;
+  polynomial_trajectory.id = 3;
   goal_marker.id = 4;
+  polynomial_trajectory.type = visualization_msgs::msg::Marker::LINE_STRIP;
   goal_marker.type = visualization_msgs::msg::Marker::CUBE;
+  // LINE_STRIP markers use only the x component of scale, for the line width
+  polynomial_trajectory.scale.x = 0.05;
   goal_marker.scale.x = 0.2;
   goal_marker.scale.y = 0.2;
   goal_marker.scale.z = 0.2;
+  // Trajectory is blue, goal is green
+  polynomial_trajectory.color.b = 1.0;
+  polynomial_trajectory.color.a = 1.0;
   goal_marker.color.g = 1.0;
   goal_marker.color.a = 1.0;
 
+  // Publish goal marker
   if (_goal_set) {
     goal_marker.pose.position.x = _goal_in_world_frame.x;
     goal_marker.pose.position.y = _goal_in_world_frame.y;
     goal_marker.pose.position.z = _goal_in_world_frame.z;
     goal_marker.pose.orientation.w = 1.0;
     visual_pub->publish(goal_marker);
+  }
+
+  // Publish polynomial trajectory
+  {
+    const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    double trajectory_duration = reference_trajectory_.get_duration();
+    if (trajectory_duration < 0.01) {
+      polynomial_trajectory.points.clear();
+      visual_pub->publish(polynomial_trajectory);
+      return;
+    }
+    geometry_msgs::msg::Point p;
+    for (int i = 0; i <= 100; i++) {
+      geometry_msgs::msg::Point position = reference_trajectory_.get_position_in_world_frame(trajectory_duration * i / 100);
+      p.x = position.x;
+      p.y = position.y;
+      p.z = position.z;
+      polynomial_trajectory.points.push_back(p);
+    }
+
+    // Change color to red when in GO_TO_GOAL state
+    if (_planner_state == PlanningStates::GO_TO_GOAL) {
+      polynomial_trajectory.color.b = 0.0;
+      polynomial_trajectory.color.r = 1.0;
+    }
+    if (_planner_state == PlanningStates::TAKING_OFF) {
+      polynomial_trajectory.points.clear();
+    }
+    visual_pub->publish(polynomial_trajectory);
   }
 }

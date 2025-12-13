@@ -248,6 +248,8 @@ class DuPlanner {
   int _num_trajectories_generated;
   //! Counter used to keep track of how many trajectories we have checked for collisions
   int _num_collision_checked, _num_collision_free;
+  //! Counter for trajectories rejected due to non-monotonic depth
+  int _num_rejected_monotonic;
   //! The time spent checking for collisions [microseconds]
   double _checking_time;
   //! The total time spent generating trajectories [microseconds]

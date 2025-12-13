@@ -51,6 +51,7 @@ DuPlanner::DuPlanner(const cv::Mat& depthImage, const PinholeCamera& camera,
     _num_trajectories_generated(0),
     _num_collision_checked(0),
     _num_collision_free(0),
+    _num_rejected_monotonic(0),
     _checking_time(0),
     _generating_time(0),
     _pyramid_search_pixel_buffer(2),  // A sample point must be more than 2 pixels away from the edge of a
@@ -138,6 +139,7 @@ bool DuPlanner::find_lowest_cost_trajectory(
       if (const auto* second_order_segment = dynamic_cast<const common_math::SecondOrderSegment*>(segments[i])) {
         if (!second_order_segment->is_monotonically_increasing_depth()) {
           is_collision_free = false;
+          _num_rejected_monotonic++;
           break;
         }
         is_collision_free &= is_segment2_collision_free(second_order_segment, trajectory_collision_probability, mahalanobis_distance);
@@ -171,9 +173,29 @@ bool DuPlanner::find_lowest_cost_trajectory(
     }
   }
   if (_debug_num_trajectories) {
+    // Compute depth stats for debugging
+    float min_depth = std::numeric_limits<float>::max();
+    float max_depth = 0.0f;
+    int valid_pixels = 0;
+    int nan_pixels = 0;
+    const uint32_t num_pixels = _camera.get_height() * _camera.get_width();
+    for (uint32_t i = 0; i < num_pixels; i++) {
+      if (std::isnan(_depth_data[i])) { nan_pixels++; continue; }
+      if (_depth_data[i] < min_depth) min_depth = _depth_data[i];
+      if (_depth_data[i] > max_depth) max_depth = _depth_data[i];
+      valid_pixels++;
+    }
     std::cout << "MIDI Debug - sampled: " << _num_trajectories_sampled 
               << ", checked: " << _num_collision_checked 
-              << ", free: " << _num_collision_free << std::endl;
+              << ", free: " << _num_collision_free
+              << ", monotonic_reject: " << _num_rejected_monotonic
+              << " | depth[" << min_depth << "-" << max_depth << "]m"
+              << ", valid_px: " << valid_pixels << "/" << num_pixels
+              << ", nan_px: " << nan_pixels 
+              << " | feasible=" << feasible_trajectory_found
+              << ", thresh_sampled=" << _sampled_trajectories_threshold
+              << ", thresh_checked=" << _checked_trajectories_threshold
+              << std::endl;
   }
   if (feasible_trajectory_found &&
       (_num_collision_checked > _checked_trajectories_threshold ||
@@ -334,7 +356,7 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
 
   if (left < 0 || right > camera.get_width() || top < 0 ||
       bottom > camera.get_height()) {
-    std::cerr << "MIDI Error: Boundary out of frame" << std::endl;
+    // std::cerr << "MIDI Error: Boundary out of frame" << std::endl;
     return false;
   }
 
