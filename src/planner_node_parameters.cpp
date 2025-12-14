@@ -50,6 +50,8 @@ bool PlannerNode::loadParameters() {
     _runtime_mode = RuntimeModes::OMNIDRONES;
   } else if (runtime_mode_str == "mavros") {
     _runtime_mode = RuntimeModes::MAVROS;
+  } else if (runtime_mode_str == "omnidrones") {
+    _runtime_mode = RuntimeModes::OMNIDRONES;
   }
 
   // Collision checking method

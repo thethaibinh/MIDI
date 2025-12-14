@@ -209,7 +209,7 @@ void PlannerNode::mav_pose_callback(const geometry_msgs::msg::PoseStamped::Share
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     _state.pose = msg->pose;
-    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp, _latest_accel_stamp});
+    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp});
     _state.t = min_stamp.seconds();
   }
 }
@@ -242,16 +242,16 @@ void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg
 
   // Debug: Log odometry with yaw periodically
   // Convert quaternion to yaw (rotation around Z axis)
-  double qw = msg->pose.pose.orientation.w;
-  double qx = msg->pose.pose.orientation.x;
-  double qy = msg->pose.pose.orientation.y;
-  double qz = msg->pose.pose.orientation.z;
-  double yaw_rad = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
-  double yaw_deg = yaw_rad * 180.0 / M_PI;
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "Odometry: pos=(%.2f, %.2f, %.2f), yaw=%.1f deg (%.2f rad)",
-    msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z,
-    yaw_deg, yaw_rad);
+  // double qw = msg->pose.pose.orientation.w;
+  // double qx = msg->pose.pose.orientation.x;
+  // double qy = msg->pose.pose.orientation.y;
+  // double qz = msg->pose.pose.orientation.z;
+  // double yaw_rad = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  // double yaw_deg = yaw_rad * 180.0 / M_PI;
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+  //   "Odometry: pos=(%.2f, %.2f, %.2f), yaw=%.1f deg (%.2f rad)",
+  //   msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z,
+  //   yaw_deg, yaw_rad);
 
   // Publish TF transform (world_frame -> vehicle_frame) from odometry
   // This allows MIDI to use TF internally without relying on external TF publishers
@@ -305,7 +305,7 @@ void PlannerNode::control_loop() {
 
 void PlannerNode::update_planner_state() {
   // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
-  if (_runtime_mode == RuntimeModes::MAVROS) {
+  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && _goal_set) {
     // Step 1: Switch to GUIDED mode if not already
     if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
       if (mode_srv->service_is_ready()) {
@@ -452,6 +452,9 @@ void PlannerNode::track_trajectory() {
       _planner_state == PlanningStates::OFF ||
       !_goal_set)
     return;
+  
+  // For TRAJECTORY_CONTROL state, we need a reference trajectory
+  // But for TAKING_OFF and GO_TO_GOAL states, we can publish setpoints without trajectory
   if (!had_reference_trajectory && _runtime_mode == RuntimeModes::MAVROS)
     return;
 
@@ -856,16 +859,14 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   // Set header for RViz visualization (pcl::toROSMsg should copy this, but ensure it's set)
   cloudMessage.header.stamp = depth_msg->header.stamp;
   cloudMessage.header.frame_id = _vehicle_frame;
-  point_cloud_pub_->publish(cloudMessage);
+  point_cloud_pub->publish(cloudMessage);
   delete cloud;  // Free memory
 
-  pointcloud_type* cloud = create_point_cloud(depth_msg);
-  
   // Get current transforms for coordinate conversions
   geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
   try {
-    body_to_world = to_world_buffer_->lookupTransform(_world_frame, _vehicle_frame, tf2::TimePointZero);
-    world_to_body = to_vehicle_buffer_->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
+    body_to_world = to_world_buffer->lookupTransform(_world_frame, _vehicle_frame, tf2::TimePointZero);
+    world_to_body = to_vehicle_buffer->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
   } catch (tf2::TransformException& ex) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "TF lookup failed: %s", ex.what());
   }
@@ -898,193 +899,190 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   
   // 1. VELOCITY FEEDBACK (CYAN) - in world frame, origin at drone position
   // This shows the raw velocity from OmniDrones odometry
-  {
-    geometry_msgs::msg::Point start, end;
-    start.x = _state.pose.position.x;
-    start.y = _state.pose.position.y;
-    start.z = _state.pose.position.z;
+  // {
+  //   geometry_msgs::msg::Point start, end;
+  //   start.x = _state.pose.position.x;
+  //   start.y = _state.pose.position.y;
+  //   start.z = _state.pose.position.z;
     
-    // Scale velocity for visibility (1 m/s = 1 meter arrow)
-    double vel_scale = 1.0;
-    end.x = start.x + _state.velocity.linear.x * vel_scale;
-    end.y = start.y + _state.velocity.linear.y * vel_scale;
-    end.z = start.z + _state.velocity.linear.z * vel_scale;
+  //   // Scale velocity for visibility (1 m/s = 1 meter arrow)
+  //   double vel_scale = 1.0;
+  //   end.x = start.x + _state.velocity.linear.x * vel_scale;
+  //   end.y = start.y + _state.velocity.linear.y * vel_scale;
+  //   end.z = start.z + _state.velocity.linear.z * vel_scale;
     
-    auto vel_arrow = create_arrow_marker(0, "velocity_world", start, end, 0.0, 1.0, 1.0, 1.0, _world_frame);
-    // debug_markers.markers.push_back(vel_arrow);
+  //   auto vel_arrow = create_arrow_marker(0, "velocity_world", start, end, 0.0, 1.0, 1.0, 1.0, _world_frame);
+  //   debug_markers.markers.push_back(vel_arrow);
     
-    // Log velocity periodically
-    // double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
-    //                            _state.velocity.linear.y * _state.velocity.linear.y +
-    //                            _state.velocity.linear.z * _state.velocity.linear.z);
-    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-    //   "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
-    //   _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
-  }
+  //   Log velocity periodically
+  //   double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
+  //                              _state.velocity.linear.y * _state.velocity.linear.y +
+  //                              _state.velocity.linear.z * _state.velocity.linear.z);
+  //   RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //     "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
+  //     _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
+  // }
   
   // 2. VELOCITY IN BODY FRAME (MAGENTA) - transformed to body frame, shown from origin in base_link
-  {
-    geometry_msgs::msg::Vector3 velocity_world_frame, velocity_body_frame;
-    velocity_world_frame = _state.velocity.linear;
-    tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
+  // {
+  //   geometry_msgs::msg::Vector3 velocity_world_frame, velocity_body_frame;
+  //   velocity_world_frame = _state.velocity.linear;
+  //   tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
     
-    geometry_msgs::msg::Point start, end;
-    start.x = start.y = start.z = 0.0;
+  //   geometry_msgs::msg::Point start, end;
+  //   start.x = start.y = start.z = 0.0;
     
-    double vel_scale = 1.0;
-    end.x = velocity_body_frame.x * vel_scale;
-    end.y = velocity_body_frame.y * vel_scale;
-    end.z = velocity_body_frame.z * vel_scale;
+  //   double vel_scale = 1.0;
+  //   end.x = velocity_body_frame.x * vel_scale;
+  //   end.y = velocity_body_frame.y * vel_scale;
+  //   end.z = velocity_body_frame.z * vel_scale;
     
-    auto vel_body_arrow = create_arrow_marker(1, "velocity_body", start, end, 1.0, 0.0, 1.0, 1.0, _vehicle_frame);
-    // debug_markers.markers.push_back(vel_body_arrow);
+  //   auto vel_body_arrow = create_arrow_marker(1, "velocity_body", start, end, 1.0, 0.0, 1.0, 1.0, _vehicle_frame);
+  //   debug_markers.markers.push_back(vel_body_arrow);
     
-    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-    //   "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
-    //   velocity_body_frame.x, velocity_body_frame.y, velocity_body_frame.z);
-  }
+  //   RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //     "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
+  //     velocity_body_frame.x, velocity_body_frame.y, velocity_body_frame.z);
+  // }
   
   // 3. GOAL VECTOR (GREEN) - direction from drone to goal in world frame
-  if (_goal_set) {
-    geometry_msgs::msg::Point start, end;
-    start.x = _state.pose.position.x;
-    start.y = _state.pose.position.y;
-    start.z = _state.pose.position.z;
+  // if (_goal_set) {
+  //   geometry_msgs::msg::Point start, end;
+  //   start.x = _state.pose.position.x;
+  //   start.y = _state.pose.position.y;
+  //   start.z = _state.pose.position.z;
     
-    // Normalize and scale for visibility
-    double dx = _goal_in_world_frame.x - start.x;
-    double dy = _goal_in_world_frame.y - start.y;
-    double dz = _goal_in_world_frame.z - start.z;
-    double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-    double arrow_len = std::min(dist, 3.0);  // Cap at 3m for visibility
+  //   // Normalize and scale for visibility
+  //   double dx = _goal_in_world_frame.x - start.x;
+  //   double dy = _goal_in_world_frame.y - start.y;
+  //   double dz = _goal_in_world_frame.z - start.z;
+  //   double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+  //   double arrow_len = std::min(dist, 3.0);  // Cap at 3m for visibility
     
-    if (dist > 0.1) {
-      end.x = start.x + (dx / dist) * arrow_len;
-      end.y = start.y + (dy / dist) * arrow_len;
-      end.z = start.z + (dz / dist) * arrow_len;
+  //   if (dist > 0.1) {
+  //     end.x = start.x + (dx / dist) * arrow_len;
+  //     end.y = start.y + (dy / dist) * arrow_len;
+  //     end.z = start.z + (dz / dist) * arrow_len;
       
-      auto goal_arrow = create_arrow_marker(2, "goal_vector", start, end, 0.0, 1.0, 0.0, 1.0, _world_frame);
-      // debug_markers.markers.push_back(goal_arrow);
+  //     auto goal_arrow = create_arrow_marker(2, "goal_vector", start, end, 0.0, 1.0, 0.0, 1.0, _world_frame);
+  //     debug_markers.markers.push_back(goal_arrow);
       
-      // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-      //   "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
-      //   dx, dy, dz, dist);
-    }
-  }
+  //     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //       "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
+  //       dx, dy, dz, dist);
+  //   }
+  // }
   // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
   //   "Point cloud: %zu total points, %zu valid points, frame_id=%s",
   //   cloud->points.size(), valid_points, cloud->header.frame_id.c_str());
 
-  sm::PointCloud2 cloudMessage;
-  pcl::toROSMsg(*cloud, cloudMessage);
-  point_cloud_pub->publish(cloudMessage);
   
   // 4. GOAL IN BODY FRAME (YELLOW) - goal direction in body frame (FLU)
-  if (_goal_set) {
-    geometry_msgs::msg::PointStamped goal_world, goal_body;
-    goal_world.header.frame_id = _world_frame;
-    goal_world.point = _goal_in_world_frame;
+  // if (_goal_set) {
+  //   geometry_msgs::msg::PointStamped goal_world, goal_body;
+  //   goal_world.header.frame_id = _world_frame;
+  //   goal_world.point = _goal_in_world_frame;
     
-    try {
-      tf2::doTransform(goal_world, goal_body, world_to_body);
+  //   try {
+  //     tf2::doTransform(goal_world, goal_body, world_to_body);
       
-      geometry_msgs::msg::Point start, end;
-      start.x = start.y = start.z = 0.0;
+  //     geometry_msgs::msg::Point start, end;
+  //     start.x = start.y = start.z = 0.0;
       
-      double dist = std::sqrt(goal_body.point.x * goal_body.point.x +
-                              goal_body.point.y * goal_body.point.y +
-                              goal_body.point.z * goal_body.point.z);
-      double arrow_len = std::min(dist, 3.0);
+  //     double dist = std::sqrt(goal_body.point.x * goal_body.point.x +
+  //                             goal_body.point.y * goal_body.point.y +
+  //                             goal_body.point.z * goal_body.point.z);
+  //     double arrow_len = std::min(dist, 3.0);
       
-      if (dist > 0.1) {
-        end.x = (goal_body.point.x / dist) * arrow_len;
-        end.y = (goal_body.point.y / dist) * arrow_len;
-        end.z = (goal_body.point.z / dist) * arrow_len;
+  //     if (dist > 0.1) {
+  //       end.x = (goal_body.point.x / dist) * arrow_len;
+  //       end.y = (goal_body.point.y / dist) * arrow_len;
+  //       end.z = (goal_body.point.z / dist) * arrow_len;
         
-        auto goal_body_arrow = create_arrow_marker(3, "goal_body", start, end, 1.0, 1.0, 0.0, 1.0, _vehicle_frame);
-        // debug_markers.markers.push_back(goal_body_arrow);
+  //       auto goal_body_arrow = create_arrow_marker(3, "goal_body", start, end, 1.0, 1.0, 0.0, 1.0, _vehicle_frame);
+  //       debug_markers.markers.push_back(goal_body_arrow);
         
-        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-        //   "GOAL (body FLU): [%.2f, %.2f, %.2f]",
-        //   goal_body.point.x, goal_body.point.y, goal_body.point.z);
-      }
-    } catch (tf2::TransformException& ex) {
-      // Ignore transform errors
-    }
-  }
+  //       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //         "GOAL (body FLU): [%.2f, %.2f, %.2f]",
+  //         goal_body.point.x, goal_body.point.y, goal_body.point.z);
+  //     }
+  //   } catch (tf2::TransformException& ex) {
+  //     // Ignore transform errors
+  //   }
+  // }
   
   // 5. EXPLORATION VECTOR / GOAL IN CAMERA FRAME (RED) - this is what the planner uses
-  if (_goal_set) {
-    geometry_msgs::msg::PointStamped goal_world, goal_body;
-    goal_world.header.frame_id = _world_frame;
-    goal_world.point = _goal_in_world_frame;
+  // if (_goal_set) {
+  //   geometry_msgs::msg::PointStamped goal_world, goal_body;
+  //   goal_world.header.frame_id = _world_frame;
+  //   goal_world.point = _goal_in_world_frame;
     
-    try {
-      tf2::doTransform(goal_world, goal_body, world_to_body);
+  //   try {
+  //     tf2::doTransform(goal_world, goal_body, world_to_body);
       
-      // Transform from body (FLU) to camera (RDF)
-      geometry_msgs::msg::Point goal_camera;
-      frame_transform::transform_body_to_camera(goal_body.point, goal_camera);
+  //     // Transform from body (FLU) to camera (RDF)
+  //     geometry_msgs::msg::Point goal_camera;
+  //     frame_transform::transform_body_to_camera(goal_body.point, goal_camera);
       
-      // The exploration vector in camera frame (RDF: X=Right, Y=Down, Z=Forward)
-      // Visualize in vehicle frame by transforming back for display
-      // Camera RDF to Body FLU: x_body = z_cam, y_body = -x_cam, z_body = -y_cam
-      geometry_msgs::msg::Point start, end;
-      start.x = start.y = start.z = 0.0;
+  //     // The exploration vector in camera frame (RDF: X=Right, Y=Down, Z=Forward)
+  //     // Visualize in vehicle frame by transforming back for display
+  //     // Camera RDF to Body FLU: x_body = z_cam, y_body = -x_cam, z_body = -y_cam
+  //     geometry_msgs::msg::Point start, end;
+  //     start.x = start.y = start.z = 0.0;
       
-      double dist = std::sqrt(goal_camera.x * goal_camera.x +
-                              goal_camera.y * goal_camera.y +
-                              goal_camera.z * goal_camera.z);
-      double arrow_len = std::min(dist, 3.0);
+  //     double dist = std::sqrt(goal_camera.x * goal_camera.x +
+  //                             goal_camera.y * goal_camera.y +
+  //                             goal_camera.z * goal_camera.z);
+  //     double arrow_len = std::min(dist, 3.0);
       
-      // Compute exploration cost values for debugging
-      Eigen::Vector3d exploration_vector(goal_camera.x, goal_camera.y, goal_camera.z);
-      Eigen::Vector3d exploration_unit = exploration_vector.normalized();
+  //     // Compute exploration cost values for debugging
+  //     Eigen::Vector3d exploration_vector(goal_camera.x, goal_camera.y, goal_camera.z);
+  //     Eigen::Vector3d exploration_unit = exploration_vector.normalized();
       
-      // Simulate a sample endpoint (e.g., 1m forward in camera frame) to show cost calculation
-      Eigen::Vector3d sample_endpoint(0.0, 0.0, 1.0);  // 1m forward in camera RDF
-      double direction_cost = -exploration_unit.dot(sample_endpoint.normalized());
-      double distance_cost = -sample_endpoint.dot(exploration_unit);
+  //     // Simulate a sample endpoint (e.g., 1m forward in camera frame) to show cost calculation
+  //     Eigen::Vector3d sample_endpoint(0.0, 0.0, 1.0);  // 1m forward in camera RDF
+  //     double direction_cost = -exploration_unit.dot(sample_endpoint.normalized());
+  //     double distance_cost = -sample_endpoint.dot(exploration_unit);
       
-      if (dist > 0.1) {
-        // Display the camera-frame vector transformed back to body frame for visualization
-        // Camera RDF -> Body FLU: Forward=Z_cam, Left=-X_cam, Up=-Y_cam
-        end.x = (goal_camera.z / dist) * arrow_len;  // Forward (body X) = Camera Z
-        end.y = (-goal_camera.x / dist) * arrow_len; // Left (body Y) = -Camera X
-        end.z = (-goal_camera.y / dist) * arrow_len; // Up (body Z) = -Camera Y
+  //     if (dist > 0.1) {
+  //       // Display the camera-frame vector transformed back to body frame for visualization
+  //       // Camera RDF -> Body FLU: Forward=Z_cam, Left=-X_cam, Up=-Y_cam
+  //       end.x = (goal_camera.z / dist) * arrow_len;  // Forward (body X) = Camera Z
+  //       end.y = (-goal_camera.x / dist) * arrow_len; // Left (body Y) = -Camera X
+  //       end.z = (-goal_camera.y / dist) * arrow_len; // Up (body Z) = -Camera Y
         
-        auto explore_arrow = create_arrow_marker(4, "exploration_camera", start, end, 1.0, 0.0, 0.0, 1.0, _vehicle_frame);
-        debug_markers.markers.push_back(explore_arrow);
+  //       auto explore_arrow = create_arrow_marker(4, "exploration_camera", start, end, 1.0, 0.0, 0.0, 1.0, _vehicle_frame);
+  //       debug_markers.markers.push_back(explore_arrow);
         
-        // Get traveling cost type as string
-        // std::string cost_type_str = (_traveling_cost == TravelingCost::DIRECTION) ? "DIRECTION" : "DISTANCE";
-        // double active_cost = (_traveling_cost == TravelingCost::DIRECTION) ? direction_cost : distance_cost;
+  //       // Get traveling cost type as string
+  //       std::string cost_type_str = (_traveling_cost == TravelingCost::DIRECTION) ? "DIRECTION" : "DISTANCE";
+  //       double active_cost = (_traveling_cost == TravelingCost::DIRECTION) ? direction_cost : distance_cost;
         
-        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-        //   "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] | Cost type: %s | "
-        //   "Direction cost: %.3f | Distance cost: %.3f | Active cost: %.3f",
-        //   goal_camera.x, goal_camera.y, goal_camera.z,
-        //   cost_type_str.c_str(), direction_cost, distance_cost, active_cost);
-      }
-    } catch (tf2::TransformException& ex) {
-      // Ignore transform errors
-    }
-  }
+  //       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+  //         "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] | Cost type: %s | "
+  //         "Direction cost: %.3f | Distance cost: %.3f | Active cost: %.3f",
+  //         goal_camera.x, goal_camera.y, goal_camera.z,
+  //         cost_type_str.c_str(), direction_cost, distance_cost, active_cost);
+  //     }
+  //   } catch (tf2::TransformException& ex) {
+  //     // Ignore transform errors
+  //   }
+  // }
   
   // 6. DRONE FORWARD DIRECTION (WHITE) - shows drone heading
-  {
-    geometry_msgs::msg::Point start, end;
-    start.x = start.y = start.z = 0.0;
-    end.x = 1.0;  // 1m forward in body frame
-    end.y = 0.0;
-    end.z = 0.0;
+  // {
+  //   geometry_msgs::msg::Point start, end;
+  //   start.x = start.y = start.z = 0.0;
+  //   end.x = 1.0;  // 1m forward in body frame
+  //   end.y = 0.0;
+  //   end.z = 0.0;
     
-    auto forward_arrow = create_arrow_marker(5, "drone_forward", start, end, 1.0, 1.0, 1.0, 0.8, _vehicle_frame);
-    debug_markers.markers.push_back(forward_arrow);
-  }
+  //   auto forward_arrow = create_arrow_marker(5, "drone_forward", start, end, 1.0, 1.0, 1.0, 0.8, _vehicle_frame);
+  //   debug_markers.markers.push_back(forward_arrow);
+  // }
   
-  // Publish all debug markers
-  debug_vectors_pub_->publish(debug_markers);
+  // // Publish all debug markers
+  // debug_vectors_pub_->publish(debug_markers);
   
   // ============================================================================
   // Original visualization code
@@ -1135,9 +1133,10 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   double trajectory_duration = reference_trajectory_.get_duration();
   if (trajectory_duration < 0.01) {
     polynomial_trajectory.points.clear();
-    visual_pub_->publish(polynomial_trajectory);
+    visual_pub->publish(polynomial_trajectory);
     return;
   }
+  geometry_msgs::msg::Point p;
   for (int i = 0; i <= 100; i++) {
     geometry_msgs::msg::Point position =
       reference_trajectory_.get_position_in_world_frame(trajectory_duration * i / 100);
@@ -1156,5 +1155,4 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
       polynomial_trajectory.points.clear();
     }
     visual_pub->publish(polynomial_trajectory);
-  }
 }

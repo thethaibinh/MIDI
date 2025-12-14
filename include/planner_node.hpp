@@ -26,7 +26,7 @@
 #include "autopilot_states.h"
 
 // math
-#include "common.hpp"
+// #include "common.hpp"
 
 // ROS2 messages
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -87,6 +87,7 @@
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 namespace sm = sensor_msgs::msg;
 typedef pcl::PointXYZ point_type;
@@ -155,7 +156,7 @@ class PlannerNode : public rclcpp::Node {
   // State switching variables
   bool state_estimate_available_;
   rclcpp::Time time_of_switch_to_current_state_, _latest_pose_stamp,
-    _latest_twist_stamp, _latest_accel_stamp;
+    _latest_twist_stamp;
   mavros_msgs::msg::State flight_controller_status;
   Eigen::Vector3d initial_start_position_;
   Eigen::Vector3d initial_land_position_;

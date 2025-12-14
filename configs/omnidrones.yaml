@@ -44,11 +44,11 @@ depth_camera:
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.9
 acc_planning_threshold: 0.1
-sampled_trajectories_threshold: 5    # Lowered for OmniDrones simulation
-checked_trajectories_threshold: 3    # Lowered - accept trajectory once we have 3 checked
+sampled_trajectories_threshold: 2000    # Lowered for OmniDrones simulation
+checked_trajectories_threshold: 150    # Lowered - accept trajectory once we have 3 checked
 3d_planning: no                     # Use 2D planning
-2d_z_margin: 0.5
-traveling_cost: "distance"          # "direction" or "distance"
+2d_z_margin: 0.2
+traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
 debug_num_trajectories: yes
 collision_probability_threshold: 5

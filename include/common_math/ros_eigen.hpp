@@ -1,5 +1,5 @@
-#ifndef DODGEROS_ROS_EIGEN_HPP
-#define DODGEROS_ROS_EIGEN_HPP
+#ifndef ROS_EIGEN_HPP
+#define ROS_EIGEN_HPP
 
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
@@ -57,5 +57,5 @@ inline Eigen::Vector3d toEigen(const geometry_msgs::msg::Vector3& v) {
 
 } // namespace quadrotor_common
 
-#endif // DODGEROS_ROS_EIGEN_HPP
+#endif // ROS_EIGEN_HPP
 

@@ -50,6 +50,18 @@ inline geometry_msgs::msg::Quaternion eigenToGeometry(const Eigen::Quaterniond& 
   return quat;
 }
 
+/**
+ * @brief Convert quaternion to Euler angles (ZYX convention: yaw, pitch, roll)
+ * @param q Input quaternion
+ * @return Euler angles as (roll, pitch, yaw) - x, y, z components
+ */
+inline Eigen::Vector3d quaternionToEulerAnglesZYX(const Eigen::Quaterniond& q) {
+  // Using Eigen's built-in conversion with ZYX order
+  Eigen::Vector3d euler = q.toRotationMatrix().eulerAngles(2, 1, 0);  // ZYX order
+  // eulerAngles returns (yaw, pitch, roll), we want (roll, pitch, yaw)
+  return Eigen::Vector3d(euler(2), euler(1), euler(0));
+}
+
 } // namespace quadrotor_common
 
 #endif // QUADROTOR_COMMON_GEOMETRY_EIGEN_CONVERSIONS_H

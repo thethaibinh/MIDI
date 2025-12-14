@@ -5,9 +5,9 @@ namespace autopilot {
 enum class PlanningStates {
   OFF,
   TAKING_OFF,
-  LAND,
+  TRAJECTORY_CONTROL,
   GO_TO_GOAL,
-  TRAJECTORY_CONTROL
+  LAND
 };
 enum class RuntimeModes { OMNIDRONES = 1, MAVROS = 2 };
 enum class MavrosControlModes { KINEMATIC = 1, ATTITUDE = 2 };
