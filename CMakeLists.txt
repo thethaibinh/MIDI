@@ -34,19 +34,14 @@ find_package(visualization_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(pcl_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
 # Custom workspace packages
-find_package(dodgeros REQUIRED)
-find_package(dodgeros_msgs REQUIRED)
-find_package(dodgelib REQUIRED)
-find_package(quadrotor_msgs REQUIRED)
-find_package(quadrotor_common REQUIRED)
-find_package(position_controller REQUIRED)
 find_package(mavros_msgs REQUIRED)
+find_package(ground_system_msgs REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 # System packages
 find_package(OpenCV REQUIRED)
@@ -61,8 +56,11 @@ if(OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
 
-# Add Ruckig submodule
-add_subdirectory(modules/ruckig)
+# Add Ruckig submodule (disable examples and tests to avoid dependency issues)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable ruckig examples" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "Disable ruckig tests" FORCE)
+set(BUILD_BENCHMARK OFF CACHE BOOL "Disable ruckig benchmark" FORCE)
+add_subdirectory(modules/ruckig EXCLUDE_FROM_ALL)
 
 # Include directories
 include_directories(
@@ -127,21 +125,17 @@ ament_target_dependencies(${PROJECT_NAME}
     cv_bridge
     image_transport
     pcl_conversions
-    pcl_ros
     tf2
     tf2_ros
     tf2_geometry_msgs
-    dodgeros
-    dodgeros_msgs
-    dodgelib
-    quadrotor_msgs
-    quadrotor_common
-    position_controller
     mavros_msgs
+    ground_system_msgs
+    ament_index_cpp
 )
 target_link_libraries(${PROJECT_NAME}
     ${CUDA_LINK_LIBS}
     ${OpenCV_LIBS}
+    ${PCL_LIBRARIES}
     yaml-cpp
     ruckig
 )
@@ -150,18 +144,18 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # Create the executable
-add_executable(main src/main.cpp)
-target_link_libraries(main
+add_executable(midi_planner_node src/main.cpp)
+target_link_libraries(midi_planner_node
     ${PROJECT_NAME}
     ruckig
     ${OpenCV_LIBS}
     Boost::program_options
     yaml-cpp
 )
-ament_target_dependencies(main rclcpp)
+ament_target_dependencies(midi_planner_node rclcpp)
 
 # Install targets
-set(INSTALL_TARGETS ${PROJECT_NAME} main)
+set(INSTALL_TARGETS ${PROJECT_NAME} midi_planner_node)
 if(CUDA_AVAILABLE)
     list(APPEND INSTALL_TARGETS cuda_collision_checker)
 endif()
@@ -192,8 +186,7 @@ ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
     rclcpp std_msgs sensor_msgs geometry_msgs nav_msgs visualization_msgs
-    cv_bridge image_transport pcl_conversions pcl_ros tf2 tf2_ros tf2_geometry_msgs
-    dodgeros dodgeros_msgs dodgelib quadrotor_msgs quadrotor_common position_controller
+    cv_bridge image_transport pcl_conversions tf2 tf2_ros tf2_geometry_msgs
 )
 
 ament_package()

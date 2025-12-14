@@ -15,7 +15,9 @@
  */
 
 #include "depth_uncertainty_planner/base_planner.hpp"
+#ifdef CUDA_AVAILABLE
 #include "depth_uncertainty_planner/cuda_collision_checker.cuh"
+#endif
 #include <omp.h>
 
 using namespace std::chrono;

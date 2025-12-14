@@ -31,12 +31,16 @@
 #include "depth_uncertainty_planner/trajectory_cost.hpp"
 #include "depth_uncertainty_planner/sampling.hpp"
 
-// CUDA
+// CUDA (only include when CUDA is available)
+#ifdef CUDA_AVAILABLE
 #include "common_math/cuda_segment.cuh"
 #include "common_math/cuda_segment2.cuh"
 #include "common_math/cuda_segment3.cuh"
 #include "common_math/cuda_conversions.cuh"
 #include "common_math/cuda_monotonic_segment3.cuh"
+// #else
+// #include "common_math/cuda_stubs.hpp"
+#endif
 // Ruckig
 #include <ruckig/ruckig.hpp>
 #include <ruckig/profile.hpp>

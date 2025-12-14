@@ -14,11 +14,12 @@ PlannerNode::PlannerNode()
 }
 
 bool PlannerNode::init() {
-  // Initialize TF2 buffers and listeners
+  // Initialize TF2 buffers, listeners, and broadcaster
   to_world_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   to_vehicle_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   to_world_tf2_ = std::make_shared<tf2_ros::TransformListener>(*to_world_buffer_);
   to_vehicle_tf2_ = std::make_shared<tf2_ros::TransformListener>(*to_vehicle_buffer_);
+  tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
   // Load parameters
   // Since topics are stored in the config file,
@@ -33,14 +34,25 @@ bool PlannerNode::init() {
   auto sensor_qos = rclcpp::SensorDataQoS();
 
   // Publishers
-  control_command_pub_ = this->create_publisher<dodgeros_msgs::msg::Command>(
-    "/kingfisher/dodgeros_pilot/feedthrough_command", 1);
   point_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_out", 1);
   visual_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/visualization", 1);
-  raw_ref_pos_pub_ = this->create_publisher<mavros_msgs::msg::PositionTarget>(
-    "mavros/setpoint_raw/local", 1);
-  att_ctrl_pub_ = this->create_publisher<mavros_msgs::msg::AttitudeTarget>(
-    "/mavros/setpoint_raw/attitude", 1);
+  debug_vectors_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/debug_vectors", 1);
+
+  // Publishers based on runtime mode
+  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Position/velocity/acceleration setpoints (PositionTarget)
+    raw_ref_pos_pub_ = this->create_publisher<mavros_msgs::msg::PositionTarget>(
+      "mavros/setpoint_raw/local", 10);
+  }
+  if (_runtime_mode == RuntimeModes::MAVROS) {
+    att_ctrl_pub_ = this->create_publisher<mavros_msgs::msg::AttitudeTarget>(
+      "/mavros/setpoint_raw/attitude", 1);
+  }
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Velocity-only setpoints (TwistStamped) - alternative control mode
+    vel_cmd_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
+      "mavros/setpoint_velocity/cmd_vel", 10);
+  }
 
   // Subscribers
   image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
@@ -53,20 +65,19 @@ bool PlannerNode::init() {
       std::bind(&PlannerNode::visualise, this, std::placeholders::_1));
   }
 
-  start_sub_ = this->create_subscription<std_msgs::msg::Empty>(
-    "/kingfisher/start_navigation", 1,
-    std::bind(&PlannerNode::start_callback, this, std::placeholders::_1));
-
   reset_sub_ = this->create_subscription<std_msgs::msg::Empty>(
     "/kingfisher/dodgeros_pilot/reset_sim", 1,
     std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1));
 
-  state_sub_ = this->create_subscription<dodgeros_msgs::msg::QuadState>(
-    "/kingfisher/dodgeros_pilot/state", rclcpp::QoS(1).best_effort(),
-    std::bind(&PlannerNode::state_callback, this, std::placeholders::_1));
+  // Mission command subscriber (unified for OmniDrones and MAVROS)
+  mission_sub_ = this->create_subscription<ground_system_msgs::msg::StartSwarmMission>(
+    "/start_swarm_mission", 10,
+    std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1));
 
+  // Subscribe to odometry - use relative topic so namespace remapping works
+  // When running in /Drone1 namespace, this becomes /Drone1/odometry
   odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/delta/odometry_sensor1/odometry", rclcpp::QoS(1).best_effort(),
+    "odometry", rclcpp::QoS(1).best_effort(),
     std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
 
   mav_state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
@@ -85,7 +96,8 @@ bool PlannerNode::init() {
     "mavros/imu/data_raw", rclcpp::QoS(1).best_effort(),
     std::bind(&PlannerNode::mav_accel_callback, this, std::placeholders::_1));
 
-  // Service clients
+  // MAVROS service clients (for real FC)
+  arming_srv_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
   takeoff_srv_ = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
   land_srv_ = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
   mode_srv_ = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
@@ -114,7 +126,8 @@ pointcloud_type* PlannerNode::create_point_cloud(const sensor_msgs::msg::Image::
     cy = depth_mat.rows / 2.0f;
     fy = (depth_mat.rows / 2) / std::tan(M_PI * _flightmare_fov / 180.0 / 2.0);
     fx = fy;
-  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+  } else if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Use camera intrinsics from config (unified for both modes)
     cx = _real_cx;
     cy = _real_cy;
     fx = fy = _real_focal_length;
@@ -150,16 +163,46 @@ pointcloud_type* PlannerNode::create_point_cloud(const sensor_msgs::msg::Image::
   return cloud;
 }
 
-void PlannerNode::start_callback(const std_msgs::msg::Empty::SharedPtr msg) {
-  (void)msg;
-  RCLCPP_WARN(this->get_logger(), "[%s] Planner: Start publishing commands!", this->get_name());
-  set_auto_pilot_state_forced(PlanningStates::START);
-  // Clear global reference trajectory
-  steering_value = 0.0f;
-  _steered = false;
-  trajectory_queue_.clear();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received mission command: %s", msg->mission_name.c_str());
+  
+  if (mission_received_) {
+    RCLCPP_WARN(this->get_logger(), "Mission already received, ignoring duplicate");
+    return;
+  }
+  
+  // Set goal coordinates based on coordinate frame convention
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // For OmniDrones NWU, goal is relative to current position
+    // NWU: X=North, Y=West, Z=Up
+    _goal_in_world_frame.x = _state.pose.position.x + _goal_north_coordinate;
+    _goal_in_world_frame.y = _state.pose.position.y + _goal_west_coordinate;
+    _goal_in_world_frame.z = _goal_up_coordinate;  // Z = Up (absolute)
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // For MAVROS ENU, record goal coordinates relative to takeoff position
+    _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
+    _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
+    _goal_in_world_frame.z = _goal_up_coordinate;
+  }
+  
+  RCLCPP_INFO(this->get_logger(), "Goal set to ENU: (%.2f, %.2f, %.2f)",
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
+  
+  _goal_set = true;
+  mission_received_ = true;
+  
+  // For OmniDrones, immediately transition to TAKING_OFF state
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Save home position for takeoff
+    _home_in_world_frame = _state.pose.position;
+    // Reset trajectory state
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+  }
 }
 
 void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
@@ -168,8 +211,14 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   set_auto_pilot_state_forced(PlanningStates::OFF);
   steering_value = 0.0f;
   _steered = false;
-  if (_runtime_mode == RuntimeModes::MAVROS) {
+  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
     _goal_set = false;
+    mission_received_ = false;
+    // Reset async service pending flags
+    mode_switch_pending_ = false;
+    arming_pending_ = false;
+    takeoff_pending_ = false;
+    land_pending_ = false;
   }
   trajectory_queue_.clear();
   reference_trajectory_ = ruckig::Trajectory<3>();
@@ -182,110 +231,55 @@ void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::Share
 
 // World: "map" - ENU
 void PlannerNode::mav_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-  // Store latest pose timestamp
-  _latest_pose_stamp = msg->header.stamp;
+  _latest_pose_stamp = rclcpp::Time(msg->header.stamp);
 
-  // pose in MAVROS "map" ENU
-  _state.pose = msg->pose;
-  _agi_state.p = agi::fromRosVec3(msg->pose.position);
-  _agi_state.q(agi::Quaternion(msg->pose.orientation.w, msg->pose.orientation.x,
-                               msg->pose.orientation.y,
-                               msg->pose.orientation.z));
-  // Update state timestamp with oldest of the latest messages
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
-    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp, _latest_accel_stamp},
-      [](const auto& a, const auto& b) {
-        return rclcpp::Time(a) < rclcpp::Time(b);
-      });
-    _agi_state.t = rclcpp::Time(min_stamp).seconds();
+    _state.pose = msg->pose;
+    _state.t = std::min(_latest_pose_stamp, _latest_twist_stamp).seconds();
   }
-  dodgeros_msgs::msg::QuadState ros_state = toRosQuadState(_agi_state);
-  state_callback(std::make_shared<dodgeros_msgs::msg::QuadState>(ros_state));
 }
 
 // Body: "base_link" - FLU
 void PlannerNode::mav_twist_callback(const geometry_msgs::msg::TwistStamped::SharedPtr msg) {
-  // Store latest twist timestamp
-  _latest_twist_stamp = msg->header.stamp;
+  _latest_twist_stamp = rclcpp::Time(msg->header.stamp);
 
-  // linear velocity
-  _agi_state.v = agi::fromRosVec3(msg->twist.linear);
-  // angular velocity
-  _agi_state.w = agi::fromRosVec3(msg->twist.angular);
-
-  const std::lock_guard<std::mutex> lock(state_mutex_);
-  // Update state timestamp with oldest of the latest messages
-  if (_collision_checking_method == CollisionCheckingMethod::PYRAMID) {
-    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp, _latest_accel_stamp},
-      [](const auto& a, const auto& b) {
-        return rclcpp::Time(a) < rclcpp::Time(b);
-      });
-    _agi_state.t = rclcpp::Time(min_stamp).seconds();
-  } else {
-    auto min_stamp = std::min(_latest_pose_stamp, _latest_twist_stamp,
-      [](const auto& a, const auto& b) {
-        return rclcpp::Time(a) < rclcpp::Time(b);
-      });
-    _agi_state.t = rclcpp::Time(min_stamp).seconds();
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    _state.velocity.linear = msg->twist.linear;
+    _state.velocity.angular = msg->twist.angular;
+    _state.t = std::min(_latest_pose_stamp, _latest_twist_stamp).seconds();
   }
 }
 
 // Body: "base_link" - FLU
 void PlannerNode::mav_accel_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
-  if (_collision_checking_method != CollisionCheckingMethod::PYRAMID) {
-    return;
-  }
-  // Store latest accel timestamp
-  _latest_accel_stamp = msg->header.stamp;
-
-  // imu accel is a sum of translational and anti-gravity in FLU (positive
-  // gravity is measured in the Downward direction)
-  geometry_msgs::msg::Vector3 acceleration_body_frame = msg->linear_acceleration;
-  geometry_msgs::msg::Vector3 anti_gravity_world_frame, anti_gravity_body_frame;
-  anti_gravity_world_frame.z = ANTI_G_ENU;
-
-  // transform ENU ("map") to FLU ("base_link")
-  geometry_msgs::msg::TransformStamped w2b_transform;
-  try {
-    w2b_transform = to_vehicle_buffer_->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
-  } catch (tf2::TransformException& ex) {
-    RCLCPP_WARN(this->get_logger(), "%s", ex.what());
-    return;
-  }
-  tf2::doTransform(anti_gravity_world_frame, anti_gravity_body_frame, w2b_transform);
-  _agi_state.a = agi::fromRosVec3(eigenToGeometry(toEigen(acceleration_body_frame) - toEigen(anti_gravity_body_frame)));
-  {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
-    // Update state timestamp with oldest of the latest messages
-    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp, _latest_accel_stamp},
-      [](const auto& a, const auto& b) {
-        return rclcpp::Time(a) < rclcpp::Time(b);
-      });
-    _agi_state.t = rclcpp::Time(min_stamp).seconds();
-  }
+  // Acceleration callback - only used for PYRAMID collision checking which requires CUDA
+  // For MIDI collision checking (CPU-only), we don't need acceleration
+  (void)msg;  // Suppress unused parameter warning
+  return;
 }
 
 void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-  agi::QuadState state;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    _state.t = rclcpp::Time(msg->header.stamp).seconds();
+    _state.pose = msg->pose.pose;
+    _state.velocity = msg->twist.twist;
+    // Note: acceleration not provided in Odometry, leave as zero
+  }
 
-  state.setZero();
-  state.t = rclcpp::Time(msg->header.stamp).seconds();
-  state.p = agi::fromRosVec3(msg->pose.pose.position);
-  state.q(agi::Quaternion(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
-                     msg->pose.pose.orientation.y,
-                     msg->pose.pose.orientation.z));
-  state.v = agi::fromRosVec3(msg->twist.twist.linear);
-  state.w = agi::fromRosVec3(msg->twist.twist.angular);
-
-  dodgeros_msgs::msg::QuadState ros_state = toRosQuadState(state);
-  state_callback(std::make_shared<dodgeros_msgs::msg::QuadState>(ros_state));
-}
-
-void PlannerNode::state_callback(const dodgeros_msgs::msg::QuadState::SharedPtr state) {
-  const std::lock_guard<std::mutex> lock(state_mutex_);
-  // assign new state
-  _state = *state;
+  // Publish TF transform (world_frame -> vehicle_frame) from odometry
+  // This allows MIDI to use TF internally without relying on external TF publishers
+  geometry_msgs::msg::TransformStamped tf_msg;
+  tf_msg.header.stamp = msg->header.stamp;
+  tf_msg.header.frame_id = _world_frame;
+  tf_msg.child_frame_id = _vehicle_frame;
+  tf_msg.transform.translation.x = msg->pose.pose.position.x;
+  tf_msg.transform.translation.y = msg->pose.pose.position.y;
+  tf_msg.transform.translation.z = msg->pose.pose.position.z;
+  tf_msg.transform.rotation = msg->pose.pose.orientation;
+  tf_broadcaster_->sendTransform(tf_msg);
 }
 
 void PlannerNode::update_reference_trajectory() {
@@ -329,40 +323,93 @@ void PlannerNode::control_loop() {
 }
 
 void PlannerNode::update_planner_state() {
-  // Update autopilot state
-  // Start/Takeoff switching (turn on)
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF &&
-      flight_controller_status.mode == "GUIDED" && flight_controller_status.armed) {
-    auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
-    request->altitude = _goal_in_world_frame.z;
-    auto result = takeoff_srv_->async_send_request(request);
-    if (result.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
-      auto response = result.get();
-      if (response->success) {
-      set_auto_pilot_state_forced(PlanningStates::START);
-        RCLCPP_WARN(this->get_logger(), "[%s] Taken off!", this->get_name());
-        usleep(100000);  // 0.1 second
+  // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
+  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && _goal_set) {
+    // Step 1: Switch to GUIDED mode if not already
+    if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
+      if (mode_srv_->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
+        request->custom_mode = "GUIDED";
+        mode_switch_pending_ = true;
+        
+        mode_srv_->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
+            mode_switch_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->mode_sent) {
+                RCLCPP_INFO(this->get_logger(), "GUIDED mode request sent");
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Failed to send GUIDED mode request");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Mode switch service failed: %s", e.what());
+            }
+          });
+      }
+      return;  // Wait for mode switch
+    }
+    
+    // Step 2: Arm if in GUIDED but not armed
+    if (flight_controller_status.mode == "GUIDED" && !flight_controller_status.armed && !arming_pending_) {
+      if (arming_srv_->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
+        request->value = true;
+        arming_pending_ = true;
+        
+        arming_srv_->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
+            arming_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->success) {
+                RCLCPP_INFO(this->get_logger(), "Arming command accepted");
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Arming command rejected");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Arming service failed: %s", e.what());
+            }
+          });
+      }
+      return;  // Wait for arming
+    }
+    
+    // Step 3: Takeoff if armed
+    if (flight_controller_status.mode == "GUIDED" && flight_controller_status.armed && !takeoff_pending_) {
+      if (takeoff_srv_->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+        request->altitude = _goal_in_world_frame.z;
+        takeoff_pending_ = true;
+        
+        takeoff_srv_->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
+            takeoff_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->success) {
+                RCLCPP_WARN(this->get_logger(), "Takeoff command accepted!");
+                set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Takeoff command rejected by FCU");
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Takeoff service failed: %s", e.what());
+            }
+          });
       }
     }
-    // Recording instant goal for an Ardupilot flight trial
-    if (!_goal_set) {
-      // East
-      _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
-      // North
-      _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
-      // Up
-      _goal_in_world_frame.z = _goal_up_coordinate;
-      RCLCPP_WARN(this->get_logger(), "[%s] Setting goal to (%.2f, %.2f, %.2f)",
-                  this->get_name(), _goal_in_world_frame.x,
-               _goal_in_world_frame.y, _goal_in_world_frame.z);
-      _goal_set = true;
-    }
+    return;  // Don't proceed with other state logic while waiting for FC
   }
 
-  // Reset the planner when the quadrotor is disarmed
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state != PlanningStates::OFF &&
-      !flight_controller_status.armed)
+  // Handle disarm detection (for real FC)
+  if (_runtime_mode == RuntimeModes::MAVROS && 
+      _planner_state != PlanningStates::OFF &&
+      !flight_controller_status.armed) {
+    RCLCPP_WARN(this->get_logger(), "Vehicle disarmed, resetting planner");
     reset_callback(nullptr);
+    return;
+  }
 
   // Skip updating planner state if goal is not set
   if (!_goal_set) return;
@@ -373,38 +420,55 @@ void PlannerNode::update_planner_state() {
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal =
     (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
+  
+  // TAKING_OFF -> TRAJECTORY_CONTROL when altitude is reached
   if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) &&
-      _planner_state == PlanningStates::START) {
+      _planner_state == PlanningStates::TAKING_OFF) {
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
   }
 
-  // Stop planning when the goal is less than 1.5m close.
+  // Stop planning when the goal is close - TRAJECTORY_CONTROL -> GO_TO_GOAL
   else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL &&
            (distance_to_goal < _go_to_goal_threshold ||
-            // NWU
+            // NWU (Flightmare and OmniDrones)
             ((_state.pose.position.x + _go_to_goal_threshold / 3) > _goal_in_world_frame.x &&
-             _runtime_mode == RuntimeModes::FLIGHTMARE) ||
-            // ENU
+             (_runtime_mode == RuntimeModes::FLIGHTMARE || _runtime_mode == RuntimeModes::OMNIDRONES)) ||
+            // ENU (MAVROS)
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
     set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
     _stop_planning_point_in_world_frame = _state.pose.position;
-  } else if (_runtime_mode == RuntimeModes::MAVROS &&
-             _planner_state == PlanningStates::GO_TO_GOAL &&
-             distance_to_goal < _go_to_goal_threshold * 0.2) {
-    auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
-    auto result = land_srv_->async_send_request(request);
-    if (result.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
-      auto response = result.get();
-      if (response->success) {
-      set_auto_pilot_state_forced(PlanningStates::LAND);
-        RCLCPP_WARN(this->get_logger(), "[%s] Landing!", this->get_name());
-      }
+  }
+  
+  // Land when at goal (MAVROS only)
+  else if (_runtime_mode == RuntimeModes::MAVROS &&
+           _planner_state == PlanningStates::GO_TO_GOAL &&
+           distance_to_goal < _go_to_goal_threshold * 0.2 &&
+           !land_pending_) {
+    if (land_srv_->service_is_ready()) {
+      auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+      land_pending_ = true;
+      
+      land_srv_->async_send_request(request,
+        [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
+          land_pending_ = false;
+          try {
+            auto response = future.get();
+            if (response->success) {
+              set_auto_pilot_state_forced(PlanningStates::LAND);
+              RCLCPP_WARN(this->get_logger(), "Land command accepted!");
+            } else {
+              RCLCPP_ERROR(this->get_logger(), "Land command rejected by FCU");
+            }
+          } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Land service failed: %s", e.what());
+          }
+        });
     }
-  // In Flightmare, the evaluation script will restart the node,
-  // therefore we don't need to reset the planner state
-  } else if (_runtime_mode == RuntimeModes::MAVROS &&
-             _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
+  }
+  // Reset after landing complete
+  else if (_runtime_mode == RuntimeModes::MAVROS &&
+           _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
     reset_callback(nullptr);
   }
 }
@@ -413,6 +477,9 @@ void PlannerNode::track_trajectory() {
   if (_planner_state == PlanningStates::LAND ||
       _planner_state == PlanningStates::OFF || !_goal_set)
     return;
+  
+  // For TRAJECTORY_CONTROL state, we need a reference trajectory
+  // But for TAKING_OFF and GO_TO_GOAL states, we can publish setpoints without trajectory
   if (!had_reference_trajectory && _runtime_mode == RuntimeModes::MAVROS)
     return;
 
@@ -420,17 +487,23 @@ void PlannerNode::track_trajectory() {
   rclcpp::Time wall_time_now = this->now();
   rclcpp::Time command_execution_time = wall_time_now + rclcpp::Duration::from_seconds(control_command_delay);
 
-  // Trajectory discretization
+  // Initialize reference_point with current state to avoid uninitialized values
   TrajectoryPoint reference_point;
-  if (_planner_state == PlanningStates::START) {
+  reference_point.position = geometryToEigen(_state.pose.position);
+  reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+  reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+  reference_point.heading = 0.0;
+  if (_planner_state == PlanningStates::TAKING_OFF) {
     _reference_trajectory_start_time = command_execution_time;
     steering_value = 0.0f;
     if (_runtime_mode == RuntimeModes::MAVROS)
       return;
-    if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
-      reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
-      reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
-      reference_point.position = Eigen::Vector3d(0.0, 0.0, _goal_in_world_frame.z);
+    if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+      // Takeoff to goal altitude at home XY position
+      reference_point.position = Eigen::Vector3d(
+        _home_in_world_frame.x, 
+        _home_in_world_frame.y, 
+        _goal_in_world_frame.z);
     }
   } else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL) {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
@@ -447,27 +520,22 @@ void PlannerNode::track_trajectory() {
     reference_point.heading = current_euler_angles(2);
   }
 
-  // Run position controller to track trajectory sample point
+  // Validate state freshness
   if (_state.t - this->now().seconds() > 0.2) {
     RCLCPP_WARN(this->get_logger(), "[%s] State is too old, skipping control command", this->get_name());
     return;
   }
-  if (_runtime_mode == RuntimeModes::MAVROS &&
-      _mavros_control_mode == MavrosControlModes::KINEMATIC) {
+  
+  // Publish position/velocity setpoint (kinematic control mode)
+  // For MAVROS and OmniDrones, we only support KINEMATIC mode
+  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
     public_ref_pos(reference_point);
     return;
   }
-  QuadStateEstimate quad_state_ = quad_common_state_from_dodgedrone_state(_state);
-  ControlCommand command = base_controller_.run(quad_state_, reference_point, base_controller_params_);
-  if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
-    command.timestamp = wall_time_now;
-    command.expected_execution_time = command_execution_time;
-    command.control_mode = ControlMode::BODY_RATES;
-    publish_control_command(command);
-  } else if (_runtime_mode == RuntimeModes::MAVROS &&
-             _mavros_control_mode == MavrosControlModes::ATTITUDE) {
-    public_ref_att(command);
-  }
+  
+  // Note: Flightmare with position_controller support has been removed
+  // The ros2-humble-cuda branch focuses on MAVROS and OmniDrones simulation
+  RCLCPP_WARN_ONCE(this->get_logger(), "[%s] Flightmare runtime mode not supported in this build", this->get_name());
 }
 
 void PlannerNode::public_ref_pos(const quadrotor_common::TrajectoryPoint& reference_point) {
@@ -476,7 +544,7 @@ void PlannerNode::public_ref_pos(const quadrotor_common::TrajectoryPoint& refere
   // FRAME_LOCAL_NED
   msg.coordinate_frame = 1;
   msg.type_mask = 0;
-  // reference_point in ENU
+  // reference_point in ENU for MAVROS and NWU for OmniDrones/Flightmare
   msg.position.x = reference_point.position(0);
   msg.position.y = reference_point.position(1);
   msg.position.z = reference_point.position(2);
@@ -488,21 +556,6 @@ void PlannerNode::public_ref_pos(const quadrotor_common::TrajectoryPoint& refere
   msg.acceleration_or_force.z = reference_point.acceleration(2);
   msg.yaw = 0.0;
   raw_ref_pos_pub_->publish(msg);
-}
-
-void PlannerNode::public_ref_att(const ControlCommand& control_cmd) {
-  mavros_msgs::msg::AttitudeTarget att_setpoint;
-  att_setpoint.type_mask = 0;
-  att_setpoint.header.stamp = this->now();
-  att_setpoint.orientation.w = control_cmd.orientation.w();
-  att_setpoint.orientation.x = control_cmd.orientation.x();
-  att_setpoint.orientation.y = control_cmd.orientation.y();
-  att_setpoint.orientation.z = control_cmd.orientation.z();
-  att_setpoint.thrust = control_cmd.collective_thrust * 0.05;
-  att_setpoint.body_rate.x = control_cmd.bodyrates(0);
-  att_setpoint.body_rate.y = control_cmd.bodyrates(1);
-  att_setpoint.body_rate.z = control_cmd.bodyrates(2);
-  att_ctrl_pub_->publish(att_setpoint);
 }
 
 void PlannerNode::get_reference_point_at_time(
@@ -562,24 +615,6 @@ void PlannerNode::get_reference_point_at_time(
   reference_point.jerk = geometryToEigen(jerk_in_world_frame);
 }
 
-void PlannerNode::publish_control_command(const ControlCommand& control_cmd) {
-  if (control_cmd.control_mode == ControlMode::NONE) {
-    RCLCPP_ERROR(this->get_logger(), "[%s] Control mode is NONE, will not publish ControlCommand",
-                 this->get_name());
-  } else {
-    dodgeros_msgs::msg::Command ros_command;
-    ros_command.header.stamp = control_cmd.timestamp;
-    ros_command.t = _state.t;
-    ros_command.is_single_rotor_thrust = false;
-    ros_command.collective_thrust = control_cmd.collective_thrust;
-    ros_command.bodyrates.x = control_cmd.bodyrates.x();
-    ros_command.bodyrates.y = control_cmd.bodyrates.y();
-    ros_command.bodyrates.z = control_cmd.bodyrates.z();
-
-    control_command_pub_->publish(ros_command);
-  }
-}
-
 void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   const rclcpp::Time time_now = this->now();
 
@@ -594,8 +629,8 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
     case PlanningStates::OFF:
       state_name = "OFF";
       break;
-    case PlanningStates::START:
-      state_name = "START";
+    case PlanningStates::TAKING_OFF:
+      state_name = "TAKING_OFF";
       break;
     case PlanningStates::TRAJECTORY_CONTROL:
       state_name = "TRAJECTORY_CONTROL";
@@ -657,8 +692,8 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
       RCLCPP_WARN(this->get_logger(), "%s", ex.what());
     }
     position_world_frame = _state.pose.position;
-    if (_runtime_mode == RuntimeModes::FLIGHTMARE) {
-      // in Flightmare, raw velocity and acceleration are in NWU (world frame)
+    if (_runtime_mode == RuntimeModes::FLIGHTMARE || _runtime_mode == RuntimeModes::OMNIDRONES) {
+      // in Flightmare/OmniDrones, raw velocity and acceleration are in NWU (world frame)
       velocity_world_frame = _state.velocity.linear;
       acceleration_world_frame = _state.acceleration.linear;
       // world to body: NWU to FLU
@@ -689,6 +724,7 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
   initial_state_camera_frame.current_position = {0.0, 0.0, 0.0};
   initial_state_camera_frame.current_velocity = {velocity_camera_frame.x, velocity_camera_frame.y,
                                                   velocity_camera_frame.z};
+  // initial_state_camera_frame.current_velocity = {0.0, 0.0, 0.0};
   initial_state_camera_frame.target_velocity = {0.0, 0.0, 0.0};
   initial_state_camera_frame.max_velocity = {_max_velocity_x, _max_velocity_y, _max_velocity_z};
   initial_state_camera_frame.max_acceleration = {_max_acceleration_x, _max_acceleration_y,
@@ -725,7 +761,8 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
     cx = depth_mat.cols / 2.0f;
     cy = depth_mat.rows / 2.0f;
     fy = (depth_mat.rows / 2) / std::tan(M_PI * _flightmare_fov / 180.0 / 2.0);
-  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+  } else if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Use camera intrinsics from config (unified for both modes)
     cx = _real_cx;
     cy = _real_cy;
     fy = _real_focal_length;
@@ -764,6 +801,10 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
     return;
   }
 
+  // Assign transforms to the optimized trajectory right before checking validity
+  // otherwise the validity check will fail because of uninitialized transforms
+  opt_traj.assign_body_to_world_transform(body_to_world);
+  opt_traj.assign_world_to_body_transform(world_to_body);
   // Only consider a valid trajectory
   if (!check_valid_trajectory(position_world_frame, opt_traj)) return;
 
@@ -772,8 +813,7 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
     const std::lock_guard<std::mutex> lock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
-    opt_traj.assign_body_to_world_transform(body_to_world);
-    opt_traj.assign_world_to_body_transform(world_to_body);
+    // Only here we push the new trajectory to the queue
     trajectory_queue_.push_back(opt_traj);
   }
 
@@ -842,8 +882,9 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
     polynomial_trajectory.color.b = 0.0;
     polynomial_trajectory.color.r = 1.0;
   }
-  if (_planner_state == PlanningStates::START)
+  if (_planner_state == PlanningStates::TAKING_OFF) {
     polynomial_trajectory.points.clear();
+  }
   visual_pub_->publish(pyramids_bases);
   visual_pub_->publish(polynomial_trajectory);
 
@@ -911,47 +952,240 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
   visual_pub_->publish(pyramids_edges);
 }
 
-QuadStateEstimate PlannerNode::quad_common_state_from_dodgedrone_state(
-  const dodgeros_msgs::msg::QuadState& _state) {
-  QuadStateEstimate quad_state_;
-
-  // frame ID
-  quad_state_.coordinate_frame = QuadStateEstimate::CoordinateFrame::WORLD;
-
-  // velocity
-  quad_state_.velocity =
-    Eigen::Vector3d(_state.velocity.linear.x, _state.velocity.linear.y,
-                    _state.velocity.linear.z);
-
-  // position
-  quad_state_.position = Eigen::Vector3d(
-    _state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
-
-  // attitude
-  quad_state_.orientation =
-    Eigen::Quaterniond(_state.pose.orientation.w, _state.pose.orientation.x,
-                       _state.pose.orientation.y, _state.pose.orientation.z);
-
-  // angular velocity
-  quad_state_.bodyrates =
-    Eigen::Vector3d(_state.velocity.angular.x, _state.velocity.angular.y,
-                    _state.velocity.angular.z);
-
-  return quad_state_;
-}
-
 void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) {
   if (!rclcpp::ok()) {
     return;
   }
+  
+  // Debug: log that we received a depth image
+  static int depth_count = 0;
+  if (++depth_count % 100 == 1) {
+    RCLCPP_INFO(this->get_logger(), "Received depth image #%d (%dx%d, encoding: %s)", 
+                depth_count, depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
+  }
+  
   // convert depth image to point cloud
   pointcloud_type* cloud = create_point_cloud(depth_msg);
   sensor_msgs::msg::PointCloud2 cloudMessage;
   pcl::toROSMsg(*cloud, cloudMessage);
+  // Set header for RViz visualization (pcl::toROSMsg should copy this, but ensure it's set)
+  cloudMessage.header.stamp = depth_msg->header.stamp;
+  cloudMessage.header.frame_id = _vehicle_frame;
   point_cloud_pub_->publish(cloudMessage);
+  delete cloud;  // Free memory
 
-  // Visualisation
-  // parameters for visualization
+  // ============================================================================
+  // DEBUG VISUALIZATION: Velocity, Goal Vector, Exploration Vector as arrows
+  // ============================================================================
+  visualization_msgs::msg::MarkerArray debug_markers;
+  
+  // Get current transforms for coordinate conversions
+  geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
+  try {
+    body_to_world = to_world_buffer_->lookupTransform(_world_frame, _vehicle_frame, tf2::TimePointZero);
+    world_to_body = to_vehicle_buffer_->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
+  } catch (tf2::TransformException& ex) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "TF lookup failed: %s", ex.what());
+  }
+  
+  // Helper lambda to create an arrow marker
+  auto create_arrow_marker = [&](int id, const std::string& ns, 
+                                  const geometry_msgs::msg::Point& start,
+                                  const geometry_msgs::msg::Point& end,
+                                  float r, float g, float b, float a,
+                                  const std::string& frame_id) {
+    visualization_msgs::msg::Marker arrow;
+    arrow.header.frame_id = frame_id;
+    arrow.header.stamp = this->now();
+    arrow.ns = ns;
+    arrow.id = id;
+    arrow.type = visualization_msgs::msg::Marker::ARROW;
+    arrow.action = visualization_msgs::msg::Marker::ADD;
+    arrow.points.push_back(start);
+    arrow.points.push_back(end);
+    arrow.scale.x = 0.05;  // shaft diameter
+    arrow.scale.y = 0.1;   // head diameter
+    arrow.scale.z = 0.1;   // head length
+    arrow.color.r = r;
+    arrow.color.g = g;
+    arrow.color.b = b;
+    arrow.color.a = a;
+    arrow.lifetime = rclcpp::Duration::from_seconds(0.5);
+    return arrow;
+  };
+  
+  // 1. VELOCITY FEEDBACK (CYAN) - in world frame, origin at drone position
+  // This shows the raw velocity from OmniDrones odometry
+  {
+    geometry_msgs::msg::Point start, end;
+    start.x = _state.pose.position.x;
+    start.y = _state.pose.position.y;
+    start.z = _state.pose.position.z;
+    
+    // Scale velocity for visibility (1 m/s = 1 meter arrow)
+    double vel_scale = 1.0;
+    end.x = start.x + _state.velocity.linear.x * vel_scale;
+    end.y = start.y + _state.velocity.linear.y * vel_scale;
+    end.z = start.z + _state.velocity.linear.z * vel_scale;
+    
+    auto vel_arrow = create_arrow_marker(0, "velocity_world", start, end, 0.0, 1.0, 1.0, 1.0, _world_frame);
+    debug_markers.markers.push_back(vel_arrow);
+    
+    // Log velocity periodically
+    double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
+                               _state.velocity.linear.y * _state.velocity.linear.y +
+                               _state.velocity.linear.z * _state.velocity.linear.z);
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+      "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
+      _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
+  }
+  
+  // 2. VELOCITY IN BODY FRAME (MAGENTA) - transformed to body frame, shown from origin in base_link
+  {
+    geometry_msgs::msg::Vector3 velocity_world_frame, velocity_body_frame;
+    velocity_world_frame = _state.velocity.linear;
+    tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
+    
+    geometry_msgs::msg::Point start, end;
+    start.x = start.y = start.z = 0.0;
+    
+    double vel_scale = 1.0;
+    end.x = velocity_body_frame.x * vel_scale;
+    end.y = velocity_body_frame.y * vel_scale;
+    end.z = velocity_body_frame.z * vel_scale;
+    
+    auto vel_body_arrow = create_arrow_marker(1, "velocity_body", start, end, 1.0, 0.0, 1.0, 1.0, _vehicle_frame);
+    debug_markers.markers.push_back(vel_body_arrow);
+    
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+      "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
+      velocity_body_frame.x, velocity_body_frame.y, velocity_body_frame.z);
+  }
+  
+  // 3. GOAL VECTOR (GREEN) - direction from drone to goal in world frame
+  if (_goal_set) {
+    geometry_msgs::msg::Point start, end;
+    start.x = _state.pose.position.x;
+    start.y = _state.pose.position.y;
+    start.z = _state.pose.position.z;
+    
+    // Normalize and scale for visibility
+    double dx = _goal_in_world_frame.x - start.x;
+    double dy = _goal_in_world_frame.y - start.y;
+    double dz = _goal_in_world_frame.z - start.z;
+    double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+    double arrow_len = std::min(dist, 3.0);  // Cap at 3m for visibility
+    
+    if (dist > 0.1) {
+      end.x = start.x + (dx / dist) * arrow_len;
+      end.y = start.y + (dy / dist) * arrow_len;
+      end.z = start.z + (dz / dist) * arrow_len;
+      
+      auto goal_arrow = create_arrow_marker(2, "goal_vector", start, end, 0.0, 1.0, 0.0, 1.0, _world_frame);
+      debug_markers.markers.push_back(goal_arrow);
+      
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+        "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
+        dx, dy, dz, dist);
+    }
+  }
+  
+  // 4. GOAL IN BODY FRAME (YELLOW) - goal direction in body frame (FLU)
+  if (_goal_set) {
+    geometry_msgs::msg::PointStamped goal_world, goal_body;
+    goal_world.header.frame_id = _world_frame;
+    goal_world.point = _goal_in_world_frame;
+    
+    try {
+      tf2::doTransform(goal_world, goal_body, world_to_body);
+      
+      geometry_msgs::msg::Point start, end;
+      start.x = start.y = start.z = 0.0;
+      
+      double dist = std::sqrt(goal_body.point.x * goal_body.point.x +
+                              goal_body.point.y * goal_body.point.y +
+                              goal_body.point.z * goal_body.point.z);
+      double arrow_len = std::min(dist, 3.0);
+      
+      if (dist > 0.1) {
+        end.x = (goal_body.point.x / dist) * arrow_len;
+        end.y = (goal_body.point.y / dist) * arrow_len;
+        end.z = (goal_body.point.z / dist) * arrow_len;
+        
+        auto goal_body_arrow = create_arrow_marker(3, "goal_body", start, end, 1.0, 1.0, 0.0, 1.0, _vehicle_frame);
+        debug_markers.markers.push_back(goal_body_arrow);
+        
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "GOAL (body FLU): [%.2f, %.2f, %.2f]",
+          goal_body.point.x, goal_body.point.y, goal_body.point.z);
+      }
+    } catch (tf2::TransformException& ex) {
+      // Ignore transform errors
+    }
+  }
+  
+  // 5. EXPLORATION VECTOR / GOAL IN CAMERA FRAME (RED) - this is what the planner uses
+  if (_goal_set) {
+    geometry_msgs::msg::PointStamped goal_world, goal_body;
+    goal_world.header.frame_id = _world_frame;
+    goal_world.point = _goal_in_world_frame;
+    
+    try {
+      tf2::doTransform(goal_world, goal_body, world_to_body);
+      
+      // Transform from body (FLU) to camera (RDF)
+      geometry_msgs::msg::Point goal_camera;
+      frame_transform::transform_body_to_camera(goal_body.point, goal_camera);
+      
+      // The exploration vector in camera frame (RDF: X=Right, Y=Down, Z=Forward)
+      // Visualize in vehicle frame by transforming back for display
+      // Camera RDF to Body FLU: x_body = z_cam, y_body = -x_cam, z_body = -y_cam
+      geometry_msgs::msg::Point start, end;
+      start.x = start.y = start.z = 0.0;
+      
+      double dist = std::sqrt(goal_camera.x * goal_camera.x +
+                              goal_camera.y * goal_camera.y +
+                              goal_camera.z * goal_camera.z);
+      double arrow_len = std::min(dist, 3.0);
+      
+      if (dist > 0.1) {
+        // Display the camera-frame vector transformed back to body frame for visualization
+        // Camera RDF -> Body FLU: Forward=Z_cam, Left=-X_cam, Up=-Y_cam
+        end.x = (goal_camera.z / dist) * arrow_len;  // Forward (body X) = Camera Z
+        end.y = (-goal_camera.x / dist) * arrow_len; // Left (body Y) = -Camera X
+        end.z = (-goal_camera.y / dist) * arrow_len; // Up (body Z) = -Camera Y
+        
+        auto explore_arrow = create_arrow_marker(4, "exploration_camera", start, end, 1.0, 0.0, 0.0, 1.0, _vehicle_frame);
+        debug_markers.markers.push_back(explore_arrow);
+        
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] -> (body FLU display): [%.2f, %.2f, %.2f]",
+          goal_camera.x, goal_camera.y, goal_camera.z,
+          end.x, end.y, end.z);
+      }
+    } catch (tf2::TransformException& ex) {
+      // Ignore transform errors
+    }
+  }
+  
+  // 6. DRONE FORWARD DIRECTION (WHITE) - shows drone heading
+  {
+    geometry_msgs::msg::Point start, end;
+    start.x = start.y = start.z = 0.0;
+    end.x = 1.0;  // 1m forward in body frame
+    end.y = 0.0;
+    end.z = 0.0;
+    
+    auto forward_arrow = create_arrow_marker(5, "drone_forward", start, end, 1.0, 1.0, 1.0, 0.8, _vehicle_frame);
+    debug_markers.markers.push_back(forward_arrow);
+  }
+  
+  // Publish all debug markers
+  debug_vectors_pub_->publish(debug_markers);
+  
+  // ============================================================================
+  // Original visualization code
+  // ============================================================================
   visualization_msgs::msg::Marker pyramids_bases, pyramids_edges, polynomial_trajectory, goal_marker;
   pyramids_bases.header.frame_id = pyramids_edges.header.frame_id =
     polynomial_trajectory.header.frame_id = goal_marker.header.frame_id = _world_frame;
@@ -1017,8 +1251,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   polynomial_trajectory.color.b = 0.0;
     polynomial_trajectory.color.r = 1.0;
   }
-  if (_planner_state == PlanningStates::START)
+  if (_planner_state == PlanningStates::TAKING_OFF) {
     polynomial_trajectory.points.clear();
+  }
   visual_pub_->publish(pyramids_bases);
   visual_pub_->publish(polynomial_trajectory);
 }

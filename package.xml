@@ -10,8 +10,6 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>dodgeros</depend>
-  <depend>dodgeros_msgs</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
@@ -20,17 +18,15 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>pcl_conversions</depend>
-  <depend>pcl_ros</depend>
-  <depend>position_controller</depend>
-  <depend>quadrotor_common</depend>
-  <depend>dodgelib</depend>
-  <depend>quadrotor_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
   <depend>mavros_msgs</depend>
-  
-  <!-- System dependencies -->
-  <depend>libopencv-dev</depend>
-  <depend>libboost-program-options-dev</depend>
-  <depend>libomp-dev</depend>
+  <depend>ground_system_msgs</depend>
+  <depend>ament_index_cpp</depend>
+
+  <!-- Note: OpenCV, Boost, OpenMP, PCL, and yaml-cpp are system dependencies
+       that should be installed in the Dockerfile, not via rosdep -->
 
   <export>
     <build_type>ament_cmake</build_type>

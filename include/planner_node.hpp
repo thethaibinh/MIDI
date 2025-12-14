@@ -18,6 +18,9 @@
 #include "depth_uncertainty_planner/base_planner.hpp"
 #include "depth_uncertainty_planner/sampling.hpp"
 #include <common_math/frame_transforms.hpp>
+#include <common_math/quad_state.hpp>
+#include <common_math/trajectory_point.hpp>
+#include <common_math/geometry_eigen_conversions.hpp>
 
 // ROS2 base
 #include <rclcpp/rclcpp.hpp>
@@ -47,38 +50,23 @@
 #include <mavros_msgs/msg/attitude_target.hpp>
 #include <mavros_msgs/msg/position_target.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <mavros_msgs/srv/command_bool.hpp>
 #include <mavros_msgs/srv/command_tol.hpp>
 #include <mavros_msgs/srv/set_mode.hpp>
+
+// Ground system messages (for mission commands)
+#include <ground_system_msgs/msg/start_swarm_mission.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
 
 #include <sstream>
 
-// dodgelib
-#include "dodgelib/math/types.hpp"
-#include "dodgeros_msgs/msg/quad_state.hpp"
-#include "dodgeros/ros_eigen.hpp"
-
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 // Eigen
 #include <Eigen/Dense>
-
-// quadrotor message (ROS2)
-#include <quadrotor_msgs/msg/control_command.hpp>
-#include <dodgeros_msgs/msg/command.hpp>
-
-// RPG quad common and control
-#include <position_controller/position_controller.h>
-#include <position_controller/position_controller_params.h>
-#include <quadrotor_common/control_command.h>
-#include <quadrotor_common/quad_state_estimate.h>
-#include <quadrotor_common/trajectory.h>
-#include <quadrotor_common/trajectory_point.h>
-#include <quadrotor_common/geometry_eigen_conversions.h>
-#include <quadrotor_common/math_common.h>
 
 // Ruckig
 #include <ruckig/ruckig.hpp>
@@ -87,11 +75,13 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 // PCL
 #include <pcl/common/io.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include "pcl/point_cloud.h"
 #include "pcl/point_types.h"
@@ -103,6 +93,7 @@ using namespace common_math;
 using namespace depth_uncertainty_planner;
 using namespace autopilot;
 using namespace quadrotor_common;
+using namespace quad_state;
 
 class PlannerNode : public rclcpp::Node {
  public:
@@ -118,18 +109,20 @@ class PlannerNode : public rclcpp::Node {
   std::string _vehicle_frame, _world_frame, _depth_topic;
   std::shared_ptr<tf2_ros::Buffer> to_world_buffer_, to_vehicle_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> to_world_tf2_, to_vehicle_tf2_;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr trajectoty_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_pub_;
-  rclcpp::Publisher<dodgeros_msgs::msg::Command>::SharedPtr control_command_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_vectors_pub_;
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr raw_ref_pos_pub_;
   rclcpp::Publisher<mavros_msgs::msg::AttitudeTarget>::SharedPtr att_ctrl_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr vel_cmd_pub_;  // For OmniDrones velocity control
   
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_sub_;
+  rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub_;  // Mission commands
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
-  rclcpp::Subscription<dodgeros_msgs::msg::QuadState>::SharedPtr state_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr visual_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub_;
@@ -137,23 +130,30 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr mav_twist_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr mav_accel_sub_;
   
+  rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_srv_;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_srv_;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_srv_;
   rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr mode_srv_;
   
+  // Mission state
+  bool mission_received_ = false;
+  
+  // Async service pending flags (to avoid blocking in control loop)
+  bool mode_switch_pending_ = false;
+  bool arming_pending_ = false;
+  bool takeoff_pending_ = false;
+  bool land_pending_ = false;
+  
   rclcpp::TimerBase::SharedPtr statusloop_timer_;
   rclcpp::TimerBase::SharedPtr control_loop_timer_;
   
-  dodgeros_msgs::msg::QuadState _state;
-  agi::QuadState _agi_state;
+  RosQuadState _state;
   double steering_value;
   bool _steered;
   std::mutex state_mutex_, trajectory_mutex_;
 
   // Autopilot
   ruckig::Trajectory<3> reference_trajectory_;
-  position_controller::PositionController base_controller_;
-  position_controller::PositionControllerParams base_controller_params_;
   bool had_reference_trajectory, _goal_set;
   PlanningStates _planner_state;
   Eigen::Vector3d targetPos_, targetVel_, targetAcc_, targetJerk_, targetSnap_, targetPos_prev_, targetVel_prev_;
@@ -161,8 +161,7 @@ class PlannerNode : public rclcpp::Node {
 
   // State switching variables
   bool state_estimate_available_;
-  rclcpp::Time time_of_switch_to_current_state_, _latest_pose_stamp,
-    _latest_twist_stamp, _latest_accel_stamp;
+  rclcpp::Time time_of_switch_to_current_state_, _latest_pose_stamp, _latest_twist_stamp;
   mavros_msgs::msg::State flight_controller_status;
   Eigen::Vector3d initial_start_position_;
   Eigen::Vector3d initial_land_position_;
@@ -173,9 +172,8 @@ class PlannerNode : public rclcpp::Node {
 
   // Callback functions
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
-  void start_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
-  void state_callback(const dodgeros_msgs::msg::QuadState::SharedPtr state);
+  void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);  // OmniDrones/MAVROS mission
   void img_callback(const sensor_msgs::msg::Image::SharedPtr depth_msg);
   void visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg);
   void odometry_callback(const nav_msgs::msg::Odometry::SharedPtr odom_msg);
@@ -186,16 +184,12 @@ class PlannerNode : public rclcpp::Node {
   void mav_accel_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
 
   // position controller functions
-  QuadStateEstimate quad_common_state_from_dodgedrone_state(
-    const dodgeros_msgs::msg::QuadState& _state);
   Eigen::Vector3d array3d_to_eigen3d(const std::array<double, 3>& arr);
   cv::Mat preprocess_depth_image(const sensor_msgs::msg::Image::SharedPtr depth_msg);
   void control_loop();
   void update_reference_trajectory();
   void track_trajectory();
   void update_planner_state();
-  void publish_control_command(const ControlCommand& control_cmd);
-  void public_ref_att(const ControlCommand& control_cmd);
   void public_ref_pos(const TrajectoryPoint& reference_point);
   void asign_reference_trajectory(rclcpp::Time wall_time_now);
   bool check_valid_trajectory(const geometry_msgs::msg::Point& current_position, const ruckig::Trajectory<3>& trajectory);
@@ -217,7 +211,7 @@ class PlannerNode : public rclcpp::Node {
   double _depth_upper_bound, _depth_lower_bound, _checking_time_ratio, _depth_sampling_margin;
   double _go_to_goal_threshold, _goal_north_coordinate, _goal_west_coordinate, _goal_up_coordinate;
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
-  geometry_msgs::msg::Point _goal_in_world_frame, _stop_planning_point_in_world_frame;
+  geometry_msgs::msg::Point _goal_in_world_frame, _stop_planning_point_in_world_frame, _home_in_world_frame;
   double _max_velocity_x, _max_velocity_y, _max_velocity_z;
   double _max_acceleration_x, _max_acceleration_y, _max_acceleration_z;
   double _acc_planning_threshold;

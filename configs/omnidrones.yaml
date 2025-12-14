@@ -1,0 +1,80 @@
+# MIDI Configuration for OmniDrones Simulation
+# Runtime mode
+runtime_mode: "omnidrones"
+collision_checking_method: "midi"  # "midi" or "pyramid" (pyramid requires CUDA)
+visualise: yes
+world_frame_name: "map"
+vehicle_frame_name: "base_link"  # MIDI publishes TF internally from odometry
+
+# Topics
+topics:
+  depth: "camera/depth/image_raw"
+
+# Goal coordinates (NWU world frame with FLU body frame)
+# NWU: X=North(forward), Y=West(left), Z=Up
+# Same convention as Flightmare
+goal_coordinate:
+  north: 20.0   # Forward distance (meters, X in NWU)
+  west: 0.0     # Left distance (meters, Y in NWU)
+  up: 3.0       # Altitude (meters, Z in NWU)
+
+# Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
+# Native: 1280x800, HFOV 127°, VFOV 79.5°
+# Simulated: 320x200 (4x decimation)
+#
+# Isaac Sim camera intrinsics:
+#   fx = (width/2) / tan(HFOV/2) = 160 / tan(63.5°) = 79.45 pixels
+#
+depth_camera:
+  depth_scale: 1.0  # OmniDrones publishes 32FC1 in meters
+  decimation_factor: 1  # Already decimated in OmniDrones
+  focal_length: 79.45   # fx = 160 / tan(63.5°) (matches OmniDrones 320x200)
+  cx: 160.0             # Principal point x (image center x = width/2)
+  cy: 100.0             # Principal point y (image center y = height/2)
+  depth_uncertainty:
+    ca0: 0.001
+    ca1: 0.0007
+    ca2: 0.005
+    cl0: 0.0
+    cl1: 0.0005
+    cl2: 0.0013
+
+# Planning parameters
+planning_cycle_time: 0.05           # Planning frequency (20 Hz)
+checking_time_ratio: 0.9
+acc_planning_threshold: 0.1
+sampled_trajectories_threshold: 2000    # Lowered for OmniDrones simulation
+checked_trajectories_threshold: 150    # Lowered - accept trajectory once we have 3 checked
+3d_planning: no                     # Use 2D planning
+2d_z_margin: 0.2
+traveling_cost: "direction"          # "direction" or "distance"
+replan_factor: 3.0
+debug_num_trajectories: yes
+collision_probability_threshold: 5
+openmp_chunk_size: 64              # Optimized: 320x200/12threads ≈ 5333 pixels, chunk=64 for good load balance
+
+# Collision checking parameters (adjust based on your drone size)
+true_vehicle_radius: 0.18           # Actual radius including propellers (m)
+planning_vehicle_radius: 0.4       # Safety margin for planning (m)
+minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
+
+# SSTO trajectory generation parameters
+depth_upper_bound: 2.5              # Max depth to plan ahead (m)
+depth_lower_bound: 1.7              # Min depth to plan ahead (m)
+depth_sampling_margin: 0.3
+is_spiral_sampling: yes
+spiral_sampling_step: 3
+
+# Kinematic constraints (adjust based on drone capabilities)
+max_velocity_x: 2.0
+max_velocity_y: 1.5
+max_velocity_z: 2.0
+max_acceleration_x: 4.0
+max_acceleration_y: 3.0
+max_acceleration_z: 4.0
+
+# Control parameters
+trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)
+go_to_goal_threshold: 2.0              # Distance to switch to goal mode (m)
+mavros_control_mode: "kinematic"       # Not used in OmniDrones mode
+
