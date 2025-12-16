@@ -295,7 +295,7 @@ void PlannerNode::update_reference_trajectory() {
   rclcpp::Time wall_time_now = this->now();
   rclcpp::Duration trajectory_point_time = wall_time_now - _reference_trajectory_start_time;
   double point_time = trajectory_point_time.seconds();
-  if (trajectory_queue_.size()) {
+  if (trajectory_queue_.size() > 0) {
     // Only track when there is a valid trajectory
     if (!had_reference_trajectory) {
       asign_reference_trajectory(wall_time_now);
@@ -505,7 +505,7 @@ void PlannerNode::track_trajectory() {
         _home_in_world_frame.y, 
         _goal_in_world_frame.z);
     }
-  } else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL) {
+  } else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
     double point_time = trajectory_point_time.seconds();
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
@@ -958,11 +958,11 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   }
   
   // Debug: log that we received a depth image
-  static int depth_count = 0;
-  if (++depth_count % 100 == 1) {
-    RCLCPP_INFO(this->get_logger(), "Received depth image #%d (%dx%d, encoding: %s)", 
-                depth_count, depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
-  }
+  // static int depth_count = 0;
+  // if (++depth_count % 100 == 1) {
+  //   RCLCPP_INFO(this->get_logger(), "Received depth image #%d (%dx%d, encoding: %s)", 
+  //               depth_count, depth_msg->width, depth_msg->height, depth_msg->encoding.c_str());
+  // }
   
   // convert depth image to point cloud
   pointcloud_type* cloud = create_point_cloud(depth_msg);
@@ -1035,9 +1035,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
     double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
                                _state.velocity.linear.y * _state.velocity.linear.y +
                                _state.velocity.linear.z * _state.velocity.linear.z);
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-      "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
-      _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
+    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+    //   "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
+    //   _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
   }
   
   // 2. VELOCITY IN BODY FRAME (MAGENTA) - transformed to body frame, shown from origin in base_link
@@ -1057,9 +1057,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
     auto vel_body_arrow = create_arrow_marker(1, "velocity_body", start, end, 1.0, 0.0, 1.0, 1.0, _vehicle_frame);
     debug_markers.markers.push_back(vel_body_arrow);
     
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-      "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
-      velocity_body_frame.x, velocity_body_frame.y, velocity_body_frame.z);
+    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+    //   "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
+    //   velocity_body_frame.x, velocity_body_frame.y, velocity_body_frame.z);
   }
   
   // 3. GOAL VECTOR (GREEN) - direction from drone to goal in world frame
@@ -1084,9 +1084,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
       auto goal_arrow = create_arrow_marker(2, "goal_vector", start, end, 0.0, 1.0, 0.0, 1.0, _world_frame);
       debug_markers.markers.push_back(goal_arrow);
       
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-        "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
-        dx, dy, dz, dist);
+      // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+      //   "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
+      //   dx, dy, dz, dist);
     }
   }
   
@@ -1115,9 +1115,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
         auto goal_body_arrow = create_arrow_marker(3, "goal_body", start, end, 1.0, 1.0, 0.0, 1.0, _vehicle_frame);
         debug_markers.markers.push_back(goal_body_arrow);
         
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-          "GOAL (body FLU): [%.2f, %.2f, %.2f]",
-          goal_body.point.x, goal_body.point.y, goal_body.point.z);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+        //   "GOAL (body FLU): [%.2f, %.2f, %.2f]",
+        //   goal_body.point.x, goal_body.point.y, goal_body.point.z);
       }
     } catch (tf2::TransformException& ex) {
       // Ignore transform errors
@@ -1158,10 +1158,10 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
         auto explore_arrow = create_arrow_marker(4, "exploration_camera", start, end, 1.0, 0.0, 0.0, 1.0, _vehicle_frame);
         debug_markers.markers.push_back(explore_arrow);
         
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-          "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] -> (body FLU display): [%.2f, %.2f, %.2f]",
-          goal_camera.x, goal_camera.y, goal_camera.z,
-          end.x, end.y, end.z);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+        //   "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] -> (body FLU display): [%.2f, %.2f, %.2f]",
+        //   goal_camera.x, goal_camera.y, goal_camera.z,
+        //   end.x, end.y, end.z);
       }
     } catch (tf2::TransformException& ex) {
       // Ignore transform errors
@@ -1229,6 +1229,10 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   }
 
   // Publish polynomial trajectory
+  if (!had_reference_trajectory) {
+    return;
+  }
+  
   double trajectory_duration = reference_trajectory_.get_duration();
   if (trajectory_duration < 0.01) {
     polynomial_trajectory.points.clear();

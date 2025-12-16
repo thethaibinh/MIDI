@@ -49,7 +49,7 @@ checked_trajectories_threshold: 150    # Lowered - accept trajectory once we hav
 2d_z_margin: 0.2
 traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
-debug_num_trajectories: yes
+debug_num_trajectories: no
 collision_probability_threshold: 5
 openmp_chunk_size: 64              # Optimized: 320x200/12threads ≈ 5333 pixels, chunk=64 for good load balance
 
