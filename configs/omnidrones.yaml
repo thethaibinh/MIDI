@@ -15,9 +15,9 @@ topics:
 # NWU: X=North(forward), Y=West(left), Z=Up
 # Drone body FLU aligns with world NWU at yaw=0
 goal_coordinate:
-  north: 20.0   # Forward distance (meters, maps to +X in NWU)
-  west: 0.0     # Left distance (meters, maps to +Y in NWU)
-  up: 3.0       # Altitude (meters, maps to +Z in NWU)
+  north: 100.0   # Forward distance (meters, X in NWU)
+  west: 0.0     # Left distance (meters, Y in NWU)
+  up: 3.0       # Altitude (meters, Z in NWU)
 
 # Depth camera parameters - OAK-D Pro Wide (simulated in OmniDrones)
 # Native: 1280x800, HFOV 127°, VFOV 79.5°
@@ -79,7 +79,7 @@ max_velocity_y: 1.5
 max_velocity_z: 2.0
 max_acceleration_x: 6.0
 max_acceleration_y: 3.0
-max_acceleration_z: 4.0
+max_acceleration_z: 6.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)

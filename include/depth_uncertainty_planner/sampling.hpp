@@ -100,18 +100,25 @@ class RandomTrajectorySampler {
         gen_pixel = spiral_search();
       else
         gen_pixel = camera.clamp_to_frame_with_margin(_pixelX(_gen), _pixelY(_gen));
+      
+      // Get raw depth value
+      double raw_depth = _depth_data[gen_pixel.y() * camera.get_width() + gen_pixel.x()];
+      
+      // If raw depth is less than true vehicle radius, it's likely from props/frame or invalid
+      // Treat as free space and use lower bound depth
+      if (raw_depth < camera.get_true_vehicle_radius()) {
+        sampled_depth = (_depth_lower_bound + _depth_upper_bound) / 2.0; // sample in middle of depth bounds
+      } else {
+        // Normal depth sampling with margin check
+        double pixel_depth_margin = raw_depth - camera.get_planning_vehicle_radius() - _depth_sampling_margin;
 
-      // Depth sampling
-      double pixel_depth_margin =
-        _depth_data[gen_pixel.y() * camera.get_width() + gen_pixel.x()] -
-        camera.get_planning_vehicle_radius() - _depth_sampling_margin;
+        // This one will collide, sample a new one
+        if (pixel_depth_margin < _depth_lower_bound) continue;
 
-      // This one will collide, sample a new one
-      if (pixel_depth_margin < _depth_lower_bound) continue;
-
-      // Take max depth of this one
-      if (pixel_depth_margin < _depth_upper_bound)
-        sampled_depth = pixel_depth_margin;
+        // Take max depth of this one
+        if (pixel_depth_margin < _depth_upper_bound)
+          sampled_depth = pixel_depth_margin;
+      }
 
       // Calculate heading direction factor using normalized 3D vectors
       Eigen::Vector3d sample_unit_vector = camera.deproject_pixel_to_point(gen_pixel.x(), gen_pixel.y(), sampled_depth).normalized();

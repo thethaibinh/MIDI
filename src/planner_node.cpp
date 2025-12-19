@@ -791,23 +791,13 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     }
     return;
   }
-
-  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-  //   "find_lowest_cost_trajectory SUCCESS - opt_traj duration=%.4f", opt_traj.get_duration());
-  // Assign transforms BEFORE validation so get_initial_position_in_world_frame() works correctly
-  opt_traj.assign_body_to_world_transform(body_to_world);
-  opt_traj.assign_world_to_body_transform(world_to_body);
-  
-  if (!check_valid_trajectory(position_world_frame, opt_traj)) {
-    // RCLCPP_WARN(this->get_logger(), "check_valid_trajectory REJECTED trajectory");
-    return;
-  }
-
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-    "Trajectory ACCEPTED, adding to queue (queue size before: %zu)", trajectory_queue_.size());
-
+  // New traj generated
   {
     const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    // Assign transforms to the optimized trajectory right before checking validity
+    // otherwise the validity check will fail because of uninitialized transforms
+    opt_traj.assign_body_to_world_transform(body_to_world);
+    opt_traj.assign_world_to_body_transform(world_to_body);    
     steering_value = 0.0f;
     _steered = false;    
     trajectory_queue_.push_back(opt_traj);
@@ -888,12 +878,12 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
     end.z = start.z + _state.velocity.linear.z * vel_scale;
     
     auto vel_arrow = create_arrow_marker(0, "velocity_world", start, end, 0.0, 1.0, 1.0, 1.0, _world_frame);
-    debug_markers.markers.push_back(vel_arrow);
+    // debug_markers.markers.push_back(vel_arrow);
     
     // Log velocity periodically
-    double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
-                               _state.velocity.linear.y * _state.velocity.linear.y +
-                               _state.velocity.linear.z * _state.velocity.linear.z);
+    // double vel_mag = std::sqrt(_state.velocity.linear.x * _state.velocity.linear.x +
+    //                            _state.velocity.linear.y * _state.velocity.linear.y +
+    //                            _state.velocity.linear.z * _state.velocity.linear.z);
     // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
     //   "VELOCITY (world): [%.2f, %.2f, %.2f] mag=%.2f m/s",
     //   _state.velocity.linear.x, _state.velocity.linear.y, _state.velocity.linear.z, vel_mag);
@@ -914,7 +904,7 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
     end.z = velocity_body_frame.z * vel_scale;
     
     auto vel_body_arrow = create_arrow_marker(1, "velocity_body", start, end, 1.0, 0.0, 1.0, 1.0, _vehicle_frame);
-    debug_markers.markers.push_back(vel_body_arrow);
+    // debug_markers.markers.push_back(vel_body_arrow);
     
     // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
     //   "VELOCITY (body FLU): [%.2f, %.2f, %.2f]",
@@ -941,7 +931,7 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
       end.z = start.z + (dz / dist) * arrow_len;
       
       auto goal_arrow = create_arrow_marker(2, "goal_vector", start, end, 0.0, 1.0, 0.0, 1.0, _world_frame);
-      debug_markers.markers.push_back(goal_arrow);
+      // debug_markers.markers.push_back(goal_arrow);
       
       // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
       //   "GOAL VECTOR (world): [%.2f, %.2f, %.2f] dist=%.2f",
@@ -979,7 +969,7 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
         end.z = (goal_body.point.z / dist) * arrow_len;
         
         auto goal_body_arrow = create_arrow_marker(3, "goal_body", start, end, 1.0, 1.0, 0.0, 1.0, _vehicle_frame);
-        debug_markers.markers.push_back(goal_body_arrow);
+        // debug_markers.markers.push_back(goal_body_arrow);
         
         // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
         //   "GOAL (body FLU): [%.2f, %.2f, %.2f]",
@@ -1014,6 +1004,15 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
                               goal_camera.z * goal_camera.z);
       double arrow_len = std::min(dist, 3.0);
       
+      // Compute exploration cost values for debugging
+      Eigen::Vector3d exploration_vector(goal_camera.x, goal_camera.y, goal_camera.z);
+      Eigen::Vector3d exploration_unit = exploration_vector.normalized();
+      
+      // Simulate a sample endpoint (e.g., 1m forward in camera frame) to show cost calculation
+      Eigen::Vector3d sample_endpoint(0.0, 0.0, 1.0);  // 1m forward in camera RDF
+      double direction_cost = -exploration_unit.dot(sample_endpoint.normalized());
+      double distance_cost = -sample_endpoint.dot(exploration_unit);
+      
       if (dist > 0.1) {
         // Display the camera-frame vector transformed back to body frame for visualization
         // Camera RDF -> Body FLU: Forward=Z_cam, Left=-X_cam, Up=-Y_cam
@@ -1024,10 +1023,15 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
         auto explore_arrow = create_arrow_marker(4, "exploration_camera", start, end, 1.0, 0.0, 0.0, 1.0, _vehicle_frame);
         debug_markers.markers.push_back(explore_arrow);
         
+        // Get traveling cost type as string
+        // std::string cost_type_str = (_traveling_cost == TravelingCost::DIRECTION) ? "DIRECTION" : "DISTANCE";
+        // double active_cost = (_traveling_cost == TravelingCost::DIRECTION) ? direction_cost : distance_cost;
+        
         // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-        //   "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] -> (body FLU display): [%.2f, %.2f, %.2f]",
+        //   "EXPLORATION (camera RDF): [%.2f, %.2f, %.2f] | Cost type: %s | "
+        //   "Direction cost: %.3f | Distance cost: %.3f | Active cost: %.3f",
         //   goal_camera.x, goal_camera.y, goal_camera.z,
-        //   end.x, end.y, end.z);
+        //   cost_type_str.c_str(), direction_cost, distance_cost, active_cost);
       }
     } catch (tf2::TransformException& ex) {
       // Ignore transform errors
