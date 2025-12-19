@@ -14,7 +14,7 @@ topics:
 # NWU: X=North(forward), Y=West(left), Z=Up
 # Same convention as Flightmare
 goal_coordinate:
-  north: 20.0   # Forward distance (meters, X in NWU)
+  north: 100.0   # Forward distance (meters, X in NWU)
   west: 0.0     # Left distance (meters, Y in NWU)
   up: 3.0       # Altitude (meters, Z in NWU)
 
@@ -59,8 +59,8 @@ planning_vehicle_radius: 0.4       # Safety margin for planning (m)
 minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
 
 # SSTO trajectory generation parameters
-depth_upper_bound: 2.5              # Max depth to plan ahead (m)
-depth_lower_bound: 1.7              # Min depth to plan ahead (m)
+depth_upper_bound: 4.0              # Max depth to plan ahead (m)
+depth_lower_bound: 1.0              # Min depth to plan ahead (m)
 depth_sampling_margin: 0.3
 is_spiral_sampling: yes
 spiral_sampling_step: 3
@@ -69,9 +69,9 @@ spiral_sampling_step: 3
 max_velocity_x: 2.0
 max_velocity_y: 1.5
 max_velocity_z: 2.0
-max_acceleration_x: 4.0
+max_acceleration_x: 6.0
 max_acceleration_y: 3.0
-max_acceleration_z: 4.0
+max_acceleration_z: 6.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)
