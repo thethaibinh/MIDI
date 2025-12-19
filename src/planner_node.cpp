@@ -520,12 +520,6 @@ void PlannerNode::track_trajectory() {
     reference_point.heading = current_euler_angles(2);
   }
 
-  // Validate state freshness
-  if (_state.t - this->now().seconds() > 0.2) {
-    RCLCPP_WARN(this->get_logger(), "[%s] State is too old, skipping control command", this->get_name());
-    return;
-  }
-  
   // Publish position/velocity setpoint (kinematic control mode)
   // For MAVROS and OmniDrones, we only support KINEMATIC mode
   if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
@@ -671,7 +665,16 @@ bool PlannerNode::check_valid_trajectory(
 void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_msg) {
   if (_planner_state != PlanningStates::TRAJECTORY_CONTROL)
     return;
-
+  // Check if depth image is too old (> 50ms)
+  rclcpp::Time depth_time = rclcpp::Time(depth_msg->header.stamp);
+  rclcpp::Time time_now = this->now();
+  if ((time_now - depth_time).seconds() > 0.05) {
+    RCLCPP_WARN(this->get_logger(),
+                         "Depth image too old (%.3f s), rejecting for planning",
+                         (time_now - depth_time).seconds());
+    return;
+  }
+  
   geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
   geometry_msgs::msg::Point position_world_frame;
   geometry_msgs::msg::Vector3 velocity_world_frame;
@@ -681,16 +684,42 @@ void PlannerNode::img_callback(const sensor_msgs::msg::Image::SharedPtr depth_ms
   test_acceleration_body_frame.x = 0.0;
   test_acceleration_body_frame.y = 0.0;
   test_acceleration_body_frame.z = 1.0;
+  double state_timestamp;  // Store state timestamp for staleness check
 
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
+    // Check if state data is too old (> 50ms) before using for planning
+    state_timestamp = _state.t;
+    double state_age = time_now.seconds() - state_timestamp;
+    if (state_age > 0.05) {
+      RCLCPP_WARN(this->get_logger(),
+            "State data too old (%.3f s), rejecting for planning",
+            state_age);
+      return;
+    }
+    
     // Lookup for transforms in the TF2 transforming tree
+
     try {
       body_to_world = to_world_buffer_->lookupTransform(_world_frame, _vehicle_frame, tf2::TimePointZero);
       world_to_body = to_vehicle_buffer_->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
     } catch (tf2::TransformException& ex) {
       RCLCPP_WARN(this->get_logger(), "%s", ex.what());
+      return;
     }
+    
+    // Check if transforms are too old (> 50ms)
+    rclcpp::Time body_to_world_time = rclcpp::Time(body_to_world.header.stamp);
+    rclcpp::Time world_to_body_time = rclcpp::Time(world_to_body.header.stamp);
+    if ((time_now - body_to_world_time).seconds() > 0.05 ||
+      (time_now - world_to_body_time).seconds() > 0.05) {
+      RCLCPP_WARN(this->get_logger(),
+            "Transform too old (body_to_world: %.3f s, world_to_body: %.3f s), rejecting for planning",
+            (time_now - body_to_world_time).seconds(),
+            (time_now - world_to_body_time).seconds());
+      return;
+    }
+    
     position_world_frame = _state.pose.position;
     if (_runtime_mode == RuntimeModes::FLIGHTMARE || _runtime_mode == RuntimeModes::OMNIDRONES) {
       // in Flightmare/OmniDrones, raw velocity and acceleration are in NWU (world frame)

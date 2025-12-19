@@ -49,18 +49,18 @@ checked_trajectories_threshold: 150    # Lowered - accept trajectory once we hav
 2d_z_margin: 0.2
 traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
-debug_num_trajectories: no
+debug_num_trajectories: yes
 collision_probability_threshold: 5
 openmp_chunk_size: 64              # Optimized: 320x200/12threads ≈ 5333 pixels, chunk=64 for good load balance
 
 # Collision checking parameters (adjust based on your drone size)
 true_vehicle_radius: 0.18           # Actual radius including propellers (m)
 planning_vehicle_radius: 0.4       # Safety margin for planning (m)
-minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
+minimum_clear_distance: 0.5         # Min clearance from obstacles (m)
 
 # SSTO trajectory generation parameters
 depth_upper_bound: 4.0              # Max depth to plan ahead (m)
-depth_lower_bound: 1.0              # Min depth to plan ahead (m)
+depth_lower_bound: 1.5              # Min depth to plan ahead (m)
 depth_sampling_margin: 0.3
 is_spiral_sampling: yes
 spiral_sampling_step: 3
