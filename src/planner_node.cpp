@@ -513,18 +513,12 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   msg.position.x = reference_point.position(0);
   msg.position.y = reference_point.position(1);
   msg.position.z = reference_point.position(2);
-  msg.velocity.x = 0.0;  // Feed zero velocity to avoid overshoot
-  msg.velocity.y = 0.0;  // Feed zero velocity to avoid overshoot
-  msg.velocity.z = 0.0;  // Feed zero velocity to avoid overshoot
-  msg.acceleration_or_force.x = 0.0;  // Feed zero acceleration to avoid jerk spikes
-  msg.acceleration_or_force.y = 0.0;  // Feed zero acceleration to avoid jerk spikes
-  msg.acceleration_or_force.z = 0.0;  // Feed zero acceleration to avoid jerk spikes
-  // msg.velocity.x = reference_point.velocity(0);
-  // msg.velocity.y = reference_point.velocity(1);
-  // msg.velocity.z = reference_point.velocity(2);
-  // msg.acceleration_or_force.x = reference_point.acceleration(0);
-  // msg.acceleration_or_force.y = reference_point.acceleration(1);
-  // msg.acceleration_or_force.z = reference_point.acceleration(2);
+  msg.velocity.x = reference_point.velocity(0);
+  msg.velocity.y = reference_point.velocity(1);
+  msg.velocity.z = reference_point.velocity(2);
+  msg.acceleration_or_force.x = reference_point.acceleration(0);
+  msg.acceleration_or_force.y = reference_point.acceleration(1);
+  msg.acceleration_or_force.z = reference_point.acceleration(2);
   msg.yaw = 0.0;
   raw_ref_pos_pub->publish(msg);
 }
