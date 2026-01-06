@@ -78,8 +78,6 @@ bool DuPlanner::find_lowest_cost_trajectory(
   bool feasible_trajectory_found = false;
   double lowest_collision_cost = std::numeric_limits<double>::max();
   double best_traveling_cost = std::numeric_limits<double>::max();
-  double best_mahalanobis_distance = std::numeric_limits<double>::max();
-  double best_trajectory_collision_probability = 0.0;
   uint32_t time_elapsed_us = 0;
   const uint32_t allocated_planning_time_us = int(_allocated_computation_time * 1e6);
   const uint32_t allocated_collision_checking_time_us = int(allocated_planning_time_us * _checking_time_ratio);
@@ -160,15 +158,8 @@ bool DuPlanner::find_lowest_cost_trajectory(
       _num_collision_free++;
       // Update segment_max_collision_probability
       feasible_trajectory_found = true;
-      if (collision_checking_method == CollisionCheckingMethod::MIDI && time_elapsed_us > allocated_collision_checking_time_us) {
-        if (trajectory_collision_probability < lowest_collision_cost) {
-          lowest_collision_cost = trajectory_collision_probability;
-          opt_trajectory = candidate_trajectory;
-        }
-      } else {
         best_traveling_cost = sampled_traveling_cost;
         opt_trajectory = candidate_trajectory;
-      }
     }
   }
   if (_debug_num_trajectories) {
@@ -364,13 +355,12 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
   const double checking_depth = endpoint.z() + camera.get_planning_vehicle_radius();
   const uint16_t img_width = camera.get_width();
   const double true_vehicle_radius = camera.get_true_vehicle_radius();
-  const double min_clear_distance = camera.get_minimum_clear_distance();
+  const double minimum_clear_distance = camera.get_minimum_clear_distance();
   const double planning_vehicle_radius = camera.get_planning_vehicle_radius();
   // Evaluate the Euclidean distance of all depth pixels in bb_ltrb to check for collision
-  double segment_collision_probability = 0.0;
   std::atomic<bool> collision_detected{false};  // Make collision_detected atomic
 
-  #pragma omp parallel for collapse(2) reduction(max : segment_collision_probability) schedule(dynamic, _openmp_chunk_size)
+  #pragma omp parallel for collapse(2) schedule(dynamic, _openmp_chunk_size)
   for (uint16_t y = top; y < bottom; y++) {
     for (uint16_t x = left; x < right; x++) {
       // Check if cancellation has been requested
@@ -386,44 +376,21 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
 
       // Skip pixels with depth smaller than the true vehicle radius
       if (spatial_z < true_vehicle_radius) continue;
-      // Skip pixels with depth greater than checking_depth + 1 meter
-      if (spatial_z > (checking_depth + 1)) continue;
-
-      const Eigen::Vector3d depth_point = camera.deproject_pixel_to_point(x, y, spatial_z);
-
-      // Skip collision checking for pixels with depth smaller than the minimum collision distance
-      if (spatial_z < min_clear_distance) {
-        if (original_segment->get_euclidean_distance(depth_point) < planning_vehicle_radius) {
-          collision_detected.store(true, std::memory_order_relaxed);
-        }
-        continue;
-      }
 
       // Skip collision checking for pixels with depth greater than checking_depth
-      if (spatial_z > checking_depth) {
-        double prob = original_segment->get_collision_probability(depth_point, camera, mahalanobis_distance);
-        segment_collision_probability = std::max(segment_collision_probability, prob);
-        if (prob > _collision_probability_threshold) {
-          collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store
-        }
-        continue;
-      }
-
+      if (spatial_z > checking_depth + minimum_clear_distance) continue;
+      
+      // Get 3D point corresponding to this pixel
+      const Eigen::Vector3d depth_point = camera.deproject_pixel_to_point(x, y, spatial_z);
       // Check for collision and compute probability for all remaining pixels
-      // (with minimum_clear_distance <= spatial_z <= checking_depth)
+      // (with true_vehicle_radius <= spatial_z <= checking_depth + minimum_clear_distance)
       if (original_segment->get_euclidean_distance(depth_point) < planning_vehicle_radius) {
         collision_detected.store(true, std::memory_order_relaxed);
-        continue;
-      }
-      double prob = original_segment->get_collision_probability(depth_point, camera, mahalanobis_distance);
-      segment_collision_probability = std::max(segment_collision_probability, prob);
-      if (prob > _collision_probability_threshold) {
-        collision_detected.store(true, std::memory_order_relaxed);  // Use atomic store
+        #pragma omp cancel for
       }
     }
   }
   if (collision_detected.load(std::memory_order_relaxed)) return false;
 
-  trajectory_collision_probability = std::max(trajectory_collision_probability, segment_collision_probability);
   return true;
 }
