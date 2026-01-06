@@ -513,12 +513,18 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   msg.position.x = reference_point.position(0);
   msg.position.y = reference_point.position(1);
   msg.position.z = reference_point.position(2);
-  msg.velocity.x = reference_point.velocity(0);
-  msg.velocity.y = reference_point.velocity(1);
-  msg.velocity.z = reference_point.velocity(2);
-  msg.acceleration_or_force.x = reference_point.acceleration(0);
-  msg.acceleration_or_force.y = reference_point.acceleration(1);
-  msg.acceleration_or_force.z = reference_point.acceleration(2);
+  msg.velocity.x = 0.0;  // Feed zero velocity to avoid overshoot
+  msg.velocity.y = 0.0;  // Feed zero velocity to avoid overshoot
+  msg.velocity.z = 0.0;  // Feed zero velocity to avoid overshoot
+  msg.acceleration_or_force.x = 0.0;  // Feed zero acceleration to avoid jerk spikes
+  msg.acceleration_or_force.y = 0.0;  // Feed zero acceleration to avoid jerk spikes
+  msg.acceleration_or_force.z = 0.0;  // Feed zero acceleration to avoid jerk spikes
+  // msg.velocity.x = reference_point.velocity(0);
+  // msg.velocity.y = reference_point.velocity(1);
+  // msg.velocity.z = reference_point.velocity(2);
+  // msg.acceleration_or_force.x = reference_point.acceleration(0);
+  // msg.acceleration_or_force.y = reference_point.acceleration(1);
+  // msg.acceleration_or_force.z = reference_point.acceleration(2);
   msg.yaw = 0.0;
   raw_ref_pos_pub->publish(msg);
 }
@@ -678,12 +684,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
   geometry_msgs::msg::Point position_world_frame;
   geometry_msgs::msg::Vector3 velocity_world_frame;
-  geometry_msgs::msg::Vector3 acceleration_world_frame, test_acceleration_world_frame;
+  geometry_msgs::msg::Vector3 acceleration_world_frame;
   geometry_msgs::msg::Vector3 velocity_body_frame;
-  geometry_msgs::msg::Vector3 acceleration_body_frame, test_acceleration_body_frame;
-  test_acceleration_body_frame.x = 0.0;
-  test_acceleration_body_frame.y = 0.0;
-  test_acceleration_body_frame.z = 1.0;
+  geometry_msgs::msg::Vector3 acceleration_body_frame;
   double state_timestamp;  // Store state timestamp for staleness check
 
   {
@@ -733,10 +736,10 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       velocity_body_frame = _state.velocity.linear;
       acceleration_body_frame = _state.acceleration.linear;
     }
-    tf2::doTransform(test_acceleration_body_frame, test_acceleration_world_frame, body_to_world);
+    tf2::doTransform(acceleration_body_frame, acceleration_world_frame, body_to_world);
   }
 
-  if (test_acceleration_world_frame.x > _acc_planning_threshold || test_acceleration_world_frame.y > _acc_planning_threshold)
+  if (acceleration_world_frame.x > _acc_planning_threshold || acceleration_world_frame.y > _acc_planning_threshold)
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
@@ -747,7 +750,12 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   }
 
   ruckig::InputParameter<3> initial_state_camera_frame;
-  initial_state_camera_frame.current_position = {0.0, 0.0, 0.0};
+  double forward_time = _planning_cycle_time + (time_now.seconds() - state_timestamp);
+  initial_state_camera_frame.current_position = {
+    velocity_camera_frame.x * forward_time,
+    velocity_camera_frame.y * forward_time,
+    velocity_camera_frame.z * forward_time
+  };
   initial_state_camera_frame.current_velocity = {velocity_camera_frame.x, velocity_camera_frame.y, velocity_camera_frame.z};
   initial_state_camera_frame.target_velocity = {0.0, 0.0, 0.0};
   initial_state_camera_frame.max_velocity = {_max_velocity_x, _max_velocity_y, _max_velocity_z};
