@@ -209,7 +209,7 @@ class PlannerNode : public rclcpp::Node {
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame, _stop_planning_point_in_world_frame;
   double _max_velocity_x, _max_velocity_y, _max_velocity_z;
   double _max_acceleration_x, _max_acceleration_y, _max_acceleration_z;
-  double _acc_planning_threshold;
+  double _acc_planning_threshold, _vel_planning_threshold;
   uint32_t _checked_trajectories_threshold, _sampled_trajectories_threshold;
   double _collision_probability_threshold;
   uint32_t _openmp_chunk_size;

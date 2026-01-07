@@ -125,6 +125,7 @@ bool PlannerNode::loadParameters() {
   _planning_cycle_time = planner_config["planning_cycle_time"].as<double>();
   _checking_time_ratio = planner_config["checking_time_ratio"].as<double>();
   _acc_planning_threshold = planner_config["acc_planning_threshold"].as<double>();
+  _vel_planning_threshold = planner_config["vel_planning_threshold"].as<double>();
   _checked_trajectories_threshold = planner_config["checked_trajectories_threshold"].as<int>();
   _3d_planning = planner_config["3d_planning"].as<bool>();
   _2d_z_margin = planner_config["2d_z_margin"].as<double>();

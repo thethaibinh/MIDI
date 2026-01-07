@@ -35,6 +35,7 @@ depth_camera:
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.6
 acc_planning_threshold: 0.1
+vel_planning_threshold: 0.4          # New: Lateral and vertical velocity threshold (m/s)
 sampled_trajectories_threshold: 10000
 checked_trajectories_threshold: 200
 3d_planning: no                     # Use 2D planning (safer for initial testing)

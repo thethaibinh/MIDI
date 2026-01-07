@@ -727,6 +727,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
       tf2::doTransform(acceleration_world_frame, acceleration_body_frame, world_to_body);
     } else if (_runtime_mode == RuntimeModes::MAVROS) {
+      // in MAVROS, raw velocity and acceleration are in FLU (body frame)
       velocity_body_frame = _state.velocity.linear;
       acceleration_body_frame = _state.acceleration.linear;
     }
@@ -734,6 +735,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   }
 
   if (acceleration_world_frame.x > _acc_planning_threshold || acceleration_world_frame.y > _acc_planning_threshold)
+    return;
+  
+  if (velocity_body_frame.y > _vel_planning_threshold || velocity_body_frame.z > _vel_planning_threshold)
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
@@ -864,15 +868,6 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   point_cloud_pub->publish(cloudMessage);
   delete cloud;  // Free memory
 
-  // Get current transforms for coordinate conversions
-  geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
-  try {
-    body_to_world = to_world_buffer->lookupTransform(_world_frame, _vehicle_frame, tf2::TimePointZero);
-    world_to_body = to_vehicle_buffer->lookupTransform(_vehicle_frame, _world_frame, tf2::TimePointZero);
-  } catch (tf2::TransformException& ex) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "TF lookup failed: %s", ex.what());
-  }
-  
   // Helper lambda to create an arrow marker
   auto create_arrow_marker = [&](int id, const std::string& ns, 
                                   const geometry_msgs::msg::Point& start,

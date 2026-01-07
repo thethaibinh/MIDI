@@ -158,8 +158,8 @@ bool DuPlanner::find_lowest_cost_trajectory(
       _num_collision_free++;
       // Update segment_max_collision_probability
       feasible_trajectory_found = true;
-        best_traveling_cost = sampled_traveling_cost;
-        opt_trajectory = candidate_trajectory;
+      best_traveling_cost = sampled_traveling_cost;
+      opt_trajectory = candidate_trajectory;
     }
   }
   if (_debug_num_trajectories) {
