@@ -411,7 +411,6 @@ void PlannerNode::update_planner_state() {
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
     set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
-    _stop_planning_point_in_world_frame = _state.pose.position;
   }
   // Land when at goal (MAVROS only)
   else if (_runtime_mode == RuntimeModes::MAVROS &&
@@ -484,8 +483,8 @@ void PlannerNode::track_trajectory() {
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
   } else if (_planner_state == PlanningStates::GO_TO_GOAL) {
     _reference_trajectory_start_time = command_execution_time;
-    steering_value = 0.0f;
-    reference_point.position = geometryToEigen(_goal_in_world_frame);
+    steering_value = 0.0f;    
+    reference_point.position = geometryToEigen(reference_trajectory_.get_terminal_position_in_world_frame());
     reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
     reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
     Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
@@ -519,7 +518,7 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   msg.acceleration_or_force.x = reference_point.acceleration(0);
   msg.acceleration_or_force.y = reference_point.acceleration(1);
   msg.acceleration_or_force.z = reference_point.acceleration(2);
-  msg.yaw = 0.0;
+  msg.yaw = reference_point.heading;
   raw_ref_pos_pub->publish(msg);
 }
 
@@ -597,8 +596,9 @@ void PlannerNode::get_reference_point_at_time(
   reference_point.heading = terminal_heading;
   Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
 
-  if (fabs(steering_value) > 1e-6)
-    reference_point.heading = current_euler_angles(2) + steering_value;
+  // Comment to turn off steering
+  // if (fabs(steering_value) > 1e-6)
+  //   reference_point.heading = current_euler_angles(2) + steering_value;
 
   reference_point.position = geometryToEigen(position_in_world_frame);
   reference_point.velocity = geometryToEigen(velocity_in_world_frame);
