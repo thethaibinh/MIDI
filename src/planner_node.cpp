@@ -205,7 +205,7 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
 }
 
 void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg) {
-  RCLCPP_INFO(this->get_logger(), "Received FBV goal: '%s' -> (%.2f, %.2f, %.2f) [confidence: %.2f]",
+  RCLCPP_INFO(this->get_logger(), "Received FBV goal (body FLU): '%s' -> Forward=%.2f, Left=%.2f, Up=%.2f [confidence: %.2f]",
               msg->target_label.c_str(), msg->goal_x, msg->goal_y, msg->goal_z, msg->confidence);
   
   if (mission_received_) {
@@ -213,12 +213,23 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
     return;
   }
   
-  // Set goal directly from FBV message (already in world frame)
-  _goal_in_world_frame.x = msg->goal_x;
-  _goal_in_world_frame.y = msg->goal_y;
-  _goal_in_world_frame.z = msg->goal_z;
+  // FBV goal is in body frame (FLU: Forward-Left-Up)
+  // Convert to world frame by adding current position (like mission_callback)
+  // Note: This assumes yaw=0 alignment (NWU world = FLU body at start)
+  // For proper rotation, would need to apply yaw rotation
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones: NWU world frame, goal_x=Forward=North, goal_y=Left=West
+    _goal_in_world_frame.x = _state.pose.position.x + msg->goal_x;
+    _goal_in_world_frame.y = _state.pose.position.y + msg->goal_y;
+    _goal_in_world_frame.z = _state.pose.position.z + msg->goal_z;
+  } else {
+    // MAVROS: ENU world frame
+    _goal_in_world_frame.x = _state.pose.position.x - msg->goal_y;  // East = -Left
+    _goal_in_world_frame.y = _state.pose.position.y + msg->goal_x;  // North = Forward
+    _goal_in_world_frame.z = _state.pose.position.z + msg->goal_z;
+  }
   
-  RCLCPP_INFO(this->get_logger(), "Setting FBV goal to (%.2f, %.2f, %.2f) - target: %s",
+  RCLCPP_INFO(this->get_logger(), "Setting FBV goal to world (%.2f, %.2f, %.2f) - target: %s",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
               msg->target_label.c_str());
   _goal_set = true;
@@ -726,32 +737,6 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   
   // Publish benchmark status on state transitions
   publish_benchmark_status(benchmark_status);
-}
-
-bool PlannerNode::check_valid_trajectory(
-  const geometry_msgs::msg::Point& current_position,
-  const ruckig::Trajectory<3>& trajectory) {
-  if (trajectory.get_duration() < 1e-6) {
-    RCLCPP_WARN(this->get_logger(), "The received trajectory is empty, rejecting it!");
-    return false;
-  }
-  
-  geometry_msgs::msg::Point traj_initial_pos = trajectory.get_initial_position_in_world_frame();
-  double pos_diff = (geometryToEigen(current_position) -
-                     geometryToEigen(traj_initial_pos)).norm();
-  
-  // RCLCPP_INFO(this->get_logger(),
-  //   "check_valid_trajectory: current_pos=[%.4f, %.4f, %.4f], traj_initial=[%.4f, %.4f, %.4f], diff=%.4f, tolerance=%.4f",
-  //   current_position.x, current_position.y, current_position.z,
-  //   traj_initial_pos.x, traj_initial_pos.y, traj_initial_pos.z,
-  //   pos_diff, kPositionJumpTolerance_);
-  
-  if (pos_diff > kPositionJumpTolerance_) {
-    RCLCPP_WARN(this->get_logger(),
-      "The received trajectory does not start at current position, rejecting it!");
-    return false;
-  }
-  return true;
 }
 
 void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {

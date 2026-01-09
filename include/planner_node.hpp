@@ -193,7 +193,6 @@ class PlannerNode : public rclcpp::Node {
   void publish_velocity_command(const TrajectoryPoint& reference_point);
   void public_ref_pos(const TrajectoryPoint& reference_point);
   void asign_reference_trajectory(rclcpp::Time wall_time_now);
-  bool check_valid_trajectory(const geometry_msgs::msg::Point& current_position, const ruckig::Trajectory<3>& trajectory);
   void get_reference_point_at_time(
     const ruckig::Trajectory<3>& reference_trajectory, const double& point_time,
     TrajectoryPoint& reference_point);

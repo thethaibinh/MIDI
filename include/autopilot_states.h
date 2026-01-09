@@ -7,7 +7,8 @@ enum class PlanningStates {
   TAKING_OFF,
   TRAJECTORY_CONTROL,
   GO_TO_GOAL,
-  LAND
+  LAND,
+  FINISHED
 };
 enum class RuntimeModes { OMNIDRONES = 1, MAVROS = 2 };
 enum class MavrosControlModes { KINEMATIC = 1, ATTITUDE = 2 };
