@@ -53,6 +53,8 @@
 
 // Ground system messages
 #include <ground_system_msgs/msg/start_swarm_mission.hpp>
+#include <ground_system_msgs/msg/fbv_goal.hpp>
+#include <ground_system_msgs/msg/benchmark_status.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -115,10 +117,12 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<sm::PointCloud2>::SharedPtr point_cloud_pub;
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr raw_ref_pos_pub;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr vel_cmd_pub;
+  rclcpp::Publisher<ground_system_msgs::msg::BenchmarkStatus>::SharedPtr benchmark_status_pub;
   
   rclcpp::Subscription<sm::Image>::SharedPtr image_sub;
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
   rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::FBVGoal>::SharedPtr fbv_goal_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
@@ -155,19 +159,21 @@ class PlannerNode : public rclcpp::Node {
 
   // State switching variables
   bool state_estimate_available_;
-  rclcpp::Time time_of_switch_to_current_state_, _latest_pose_stamp,
-    _latest_twist_stamp;
+  rclcpp::Time time_of_switch_to_current_state_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time _latest_pose_stamp{0, 0, RCL_ROS_TIME};
+  rclcpp::Time _latest_twist_stamp{0, 0, RCL_ROS_TIME};
   mavros_msgs::msg::State flight_controller_status;
   Eigen::Vector3d initial_start_position_;
   Eigen::Vector3d initial_land_position_;
 
   // Trajectory execution variables
   std::list<ruckig::Trajectory<3>> trajectory_queue_;
-  rclcpp::Time _reference_trajectory_start_time;
+  rclcpp::Time _reference_trajectory_start_time{0, 0, RCL_ROS_TIME};
 
   // Callback functions
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
+  void fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void img_callback(const sm::Image::SharedPtr depth_msg);
   void visualise(const sm::Image::SharedPtr depth_msg);
@@ -194,6 +200,9 @@ class PlannerNode : public rclcpp::Node {
   bool loadParameters();
   void set_auto_pilot_state_forced(const PlanningStates& new_state);
   pointcloud_type* create_point_cloud (const sm::Image::SharedPtr depth_msg);
+  
+  // Benchmark helpers
+  void publish_benchmark_status(uint8_t status);
 
   // Constants
   static constexpr double kPositionJumpTolerance_ = 0.5;
@@ -219,6 +228,11 @@ class PlannerNode : public rclcpp::Node {
   double _true_vehicle_radius;
   double _planning_vehicle_radius;
   double _minimum_clear_distance;
+  
+  // Benchmark tracking
+  int32_t _current_trial_id = 0;
+  rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
+  bool _trial_started = false;
 };
 
 #endif  // PLANNER_NODE_HPP

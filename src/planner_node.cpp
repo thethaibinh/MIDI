@@ -29,6 +29,10 @@ PlannerNode::PlannerNode()
   point_cloud_pub = this->create_publisher<sm::PointCloud2>("/cloud_out", 10);
   visual_pub = this->create_publisher<visualization_msgs::msg::Marker>("/visualization", 10);
 
+  // Benchmark status publisher (for automated testing)
+  benchmark_status_pub = this->create_publisher<ground_system_msgs::msg::BenchmarkStatus>(
+    "/benchmark/planner_status", 10);
+
   // Publishers based on runtime mode
   if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
     // Position/velocity/acceleration setpoints (PositionTarget)
@@ -54,6 +58,11 @@ PlannerNode::PlannerNode()
   mission_sub = this->create_subscription<ground_system_msgs::msg::StartSwarmMission>(
     "/start_swarm_mission", 10,
     std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1));
+
+  // FBV (Fly-by-Voice) goal subscriber - receives VLM-extracted goals
+  fbv_goal_sub = this->create_subscription<ground_system_msgs::msg::FBVGoal>(
+    "/fbv_goal", 10,
+    std::bind(&PlannerNode::fbv_goal_callback, this, std::placeholders::_1));
 
   reset_sub = this->create_subscription<std_msgs::msg::Empty>(
     "/reset_planner", 10,
@@ -149,6 +158,19 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     return;
   }
   
+  // Extract trial ID from mission name if it's a benchmark trial
+  // Format: "benchmark_trial_N" where N is the trial number
+  if (msg->mission_name.find("benchmark_trial_") == 0) {
+    try {
+      _current_trial_id = std::stoi(msg->mission_name.substr(16));
+      RCLCPP_INFO(this->get_logger(), "Benchmark trial %d started", _current_trial_id);
+    } catch (...) {
+      _current_trial_id++;
+    }
+  } else {
+    _current_trial_id++;
+  }
+  
   // Set goal coordinates based on coordinate frame convention
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones uses NWU (North-West-Up): X=North, Y=West, Z=Up
@@ -179,6 +201,43 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
     // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
     RCLCPP_WARN(this->get_logger(), "[MAVROS] Mission received, initiating flight sequence...");
+  }
+}
+
+void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received FBV goal: '%s' -> (%.2f, %.2f, %.2f) [confidence: %.2f]",
+              msg->target_label.c_str(), msg->goal_x, msg->goal_y, msg->goal_z, msg->confidence);
+  
+  if (mission_received_) {
+    RCLCPP_WARN(this->get_logger(), "Mission already in progress, ignoring FBV goal");
+    return;
+  }
+  
+  // Set goal directly from FBV message (already in world frame)
+  _goal_in_world_frame.x = msg->goal_x;
+  _goal_in_world_frame.y = msg->goal_y;
+  _goal_in_world_frame.z = msg->goal_z;
+  
+  RCLCPP_INFO(this->get_logger(), "Setting FBV goal to (%.2f, %.2f, %.2f) - target: %s",
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
+              msg->target_label.c_str());
+  _goal_set = true;
+  mission_received_ = true;
+  
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Simulation mode: directly start trajectory control
+    RCLCPP_WARN(this->get_logger(), "[SIM/FBV] Starting navigation to '%s'!", msg->target_label.c_str());
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    _home_in_world_frame = _state.pose.position;
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
+    RCLCPP_WARN(this->get_logger(), "[MAVROS/FBV] Goal received, initiating flight sequence to '%s'...",
+                msg->target_label.c_str());
   }
 }
 
@@ -399,10 +458,7 @@ void PlannerNode::update_planner_state() {
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
 
   // Transition from START to TRAJECTORY_CONTROL when altitude reached
-  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Current altitude: %.2f, Goal altitude: %.2f", _state.pose.position.z, _goal_in_world_frame.z);
-  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Current planner state: %d", static_cast<int>(_planner_state));
   if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::TAKING_OFF) {
-    // RCLCPP_INFO(this->get_logger(), "New state!");
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
   }
   // Transition to GO_TO_GOAL when near goal
@@ -606,6 +662,34 @@ void PlannerNode::get_reference_point_at_time(
   reference_point.jerk = geometryToEigen(jerk_in_world_frame);
 }
 
+void PlannerNode::publish_benchmark_status(uint8_t status) {
+  auto msg = ground_system_msgs::msg::BenchmarkStatus();
+  msg.header.stamp = this->now();
+  msg.trial_id = _current_trial_id;
+  msg.drone_id = 1;  // TODO: Get from namespace if multi-drone
+  msg.status = status;
+  
+  msg.position.x = _state.pose.position.x;
+  msg.position.y = _state.pose.position.y;
+  msg.position.z = _state.pose.position.z;
+  
+  msg.goal.x = _goal_in_world_frame.x;
+  msg.goal.y = _goal_in_world_frame.y;
+  msg.goal.z = _goal_in_world_frame.z;
+  
+  Eigen::Vector3d pos(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  Eigen::Vector3d goal(_goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
+  msg.distance_to_goal = (pos - goal).norm();
+  
+  if (_trial_started) {
+    msg.elapsed_time = (this->now() - _trial_start_time).seconds();
+  } else {
+    msg.elapsed_time = 0.0;
+  }
+  
+  benchmark_status_pub->publish(msg);
+}
+
 void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   const rclcpp::Time time_now = this->now();
 
@@ -616,24 +700,32 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   _planner_state = new_state;
 
   std::string state_name;
+  uint8_t benchmark_status = 0;  // IN_PROGRESS
   switch (_planner_state) {
     case PlanningStates::OFF:
       state_name = "OFF";
       break;
     case PlanningStates::TAKING_OFF:
       state_name = "TAKING_OFF";
+      _trial_start_time = time_now;  // Start benchmark timer
+      _trial_started = true;
       break;
     case PlanningStates::TRAJECTORY_CONTROL:
       state_name = "TRAJECTORY_CONTROL";
       break;
     case PlanningStates::GO_TO_GOAL:
       state_name = "GO_TO_GOAL";
+      benchmark_status = 1;  // GOAL_REACHED
       break;
     case PlanningStates::LAND:
       state_name = "LAND";
+      benchmark_status = 1;  // GOAL_REACHED (landing is success)
       break;
   }
   RCLCPP_WARN(this->get_logger(), "Switched to %s state", state_name.c_str());
+  
+  // Publish benchmark status on state transitions
+  publish_benchmark_status(benchmark_status);
 }
 
 bool PlannerNode::check_valid_trajectory(
