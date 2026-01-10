@@ -62,7 +62,7 @@ minimum_clear_distance: 0.5         # Min clearance from obstacles (m)
 
 # SSTO trajectory generation parameters
 depth_upper_bound: 3.0              # Max depth to plan ahead (m)
-depth_lower_bound: 1.5              # Min depth to plan ahead (m)
+depth_lower_bound: 0.7              # Min depth to plan ahead (m)
 depth_sampling_margin: 0.3
 is_spiral_sampling: yes
 spiral_sampling_step: 3
@@ -84,6 +84,6 @@ max_acceleration_z: 6.0
 
 # Control parameters
 trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)
-go_to_goal_threshold: 2.0              # Distance to switch to goal mode (m)
+go_to_goal_threshold: 1.5              # Distance to switch to goal mode (m)
 mavros_control_mode: "kinematic"       # Not used in OmniDrones mode
 

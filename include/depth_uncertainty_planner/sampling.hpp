@@ -118,6 +118,9 @@ class RandomTrajectorySampler {
         // Take max depth of this one
         if (pixel_depth_margin < _depth_upper_bound)
           sampled_depth = pixel_depth_margin;
+        
+        if (_exploration_vector.x() < _depth_upper_bound)
+          sampled_depth = std::min(sampled_depth, _exploration_vector.x());
       }
 
       // Calculate heading direction factor using normalized 3D vectors
