@@ -38,7 +38,7 @@ class RandomTrajectorySampler {
   RandomTrajectorySampler(const common_math::PinholeCamera& camera,
                           const double& depth_upper_bound,
                           const double& depth_lower_bound,
-                          const Eigen::Vector3d& exploration_vector,
+                          const Eigen::Vector3d& goal_vector_camera_frame,
                           const double& depth_sampling_margin,
                           const geometry_msgs::msg::TransformStamped& body_to_world,
                           const geometry_msgs::msg::Point& goal_in_world_frame,
@@ -50,7 +50,7 @@ class RandomTrajectorySampler {
     : _gen(_rd()),
       _depth_upper_bound(depth_upper_bound),
       _depth_lower_bound(depth_lower_bound),
-      _exploration_vector(exploration_vector),
+      _exploration_vector(goal_vector_camera_frame),
       _depth_sampling_margin(depth_sampling_margin),
       _body_to_world(body_to_world),
       _goal_in_world_frame(goal_in_world_frame),
@@ -65,7 +65,7 @@ class RandomTrajectorySampler {
     _spiral_direction = 0;
     _spiral_initialized = false;
     // Project the exploration vector onto the image plane
-    _projected_goal = camera.project_point_to_pixel(exploration_vector);
+    _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
     std::vector<uint16_t> frame_dims = camera.get_frame_dimensions_with_true_radius_margin();
     sampling_range = {
       frame_dims[0], frame_dims[1],

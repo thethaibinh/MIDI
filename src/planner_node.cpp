@@ -221,12 +221,12 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
     // OmniDrones: NWU world frame, goal_x=Forward=North, goal_y=Left=West
     _goal_in_world_frame.x = _state.pose.position.x + msg->goal_x;
     _goal_in_world_frame.y = _state.pose.position.y + msg->goal_y;
-    _goal_in_world_frame.z = _state.pose.position.z + msg->goal_z;
+    _goal_in_world_frame.z = msg->goal_z;
   } else {
     // MAVROS: ENU world frame
     _goal_in_world_frame.x = _state.pose.position.x - msg->goal_y;  // East = -Left
     _goal_in_world_frame.y = _state.pose.position.y + msg->goal_x;  // North = Forward
-    _goal_in_world_frame.z = _state.pose.position.z + msg->goal_z;
+    _goal_in_world_frame.z = msg->goal_z;
   }
   
   RCLCPP_INFO(this->get_logger(), "Setting FBV goal to world (%.2f, %.2f, %.2f) - target: %s",
@@ -746,9 +746,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   rclcpp::Time depth_time = rclcpp::Time(depth_msg->header.stamp);
   rclcpp::Time time_now = this->now();
   if ((time_now - depth_time).seconds() > 0.05) {
-    RCLCPP_WARN(this->get_logger(),
-                         "Depth image too old (%.3f s), rejecting for planning",
-                         (time_now - depth_time).seconds());
+    // RCLCPP_WARN(this->get_logger(),
+    //                      "Depth image too old (%.3f s), rejecting for planning",
+    //                      (time_now - depth_time).seconds());
     return;
   }
   
@@ -766,9 +766,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     state_timestamp = _state.t;
     double state_age = time_now.seconds() - state_timestamp;
     if (state_age > 0.05) {
-      RCLCPP_WARN(this->get_logger(),
-            "State data too old (%.3f s), rejecting for planning",
-            state_age);
+      // RCLCPP_WARN(this->get_logger(),
+      //       "State data too old (%.3f s), rejecting for planning",
+      //       state_age);
       return;
     }
     
@@ -789,10 +789,10 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     rclcpp::Time world_to_body_time = rclcpp::Time(world_to_body.header.stamp);
     if ((time_now - body_to_world_time).seconds() > 0.05 ||
       (time_now - world_to_body_time).seconds() > 0.05) {
-      RCLCPP_WARN(this->get_logger(),
-            "Transform too old (body_to_world: %.3f s, world_to_body: %.3f s), rejecting for planning",
-            (time_now - body_to_world_time).seconds(),
-            (time_now - world_to_body_time).seconds());
+      // RCLCPP_WARN(this->get_logger(),
+      //       "Transform too old (body_to_world: %.3f s, world_to_body: %.3f s), rejecting for planning",
+      //       (time_now - body_to_world_time).seconds(),
+      //       (time_now - world_to_body_time).seconds());
       return;
     }
     
@@ -859,7 +859,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   //   goal_in_body_frame.point.x, goal_in_body_frame.point.y, goal_in_body_frame.point.z,
   //   goal_in_camera_frame.point.x, goal_in_camera_frame.point.y, goal_in_camera_frame.point.z);
   
-  Eigen::Vector3d exploration_vector(goal_in_camera_frame.point.x,
+  Eigen::Vector3d goal_vector_camera_frame(goal_in_camera_frame.point.x,
                                      goal_in_camera_frame.point.y,
                                      goal_in_camera_frame.point.z);
 
@@ -879,7 +879,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
                        _planning_vehicle_radius, _minimum_clear_distance);
 
   RandomTrajectorySampler trajectory_sampler(
-    camera, _depth_upper_bound, _depth_lower_bound, exploration_vector,
+    camera, _depth_upper_bound, _depth_lower_bound, goal_vector_camera_frame,
     _depth_sampling_margin, body_to_world, _goal_in_world_frame, _world_frame,
     _3d_planning, _2d_z_margin, _is_spiral_sampling, _spiral_sampling_step);
 
@@ -889,11 +889,11 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
                     _collision_probability_threshold, _openmp_chunk_size);
   ruckig::Trajectory<3> opt_traj;
 
-  ExplorationCost exploration_cost(exploration_vector, _traveling_cost);
+  ExplorationCost exploration_cost(goal_vector_camera_frame, _traveling_cost);
   
   // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-  //   "img_callback: exploration_vector=[%.2f, %.2f, %.2f], depth_mat size=%dx%d",
-  //   exploration_vector[0], exploration_vector[1], exploration_vector[2],
+  //   "img_callback: goal_vector_camera_frame=[%.2f, %.2f, %.2f], depth_mat size=%dx%d",
+  //   goal_vector_camera_frame[0], goal_vector_camera_frame[1], goal_vector_camera_frame[2],
   //   depth_mat.cols, depth_mat.rows);
 
   if (!planner.find_lowest_cost_trajectory(
@@ -1110,8 +1110,8 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   //     double arrow_len = std::min(dist, 3.0);
       
   //     // Compute exploration cost values for debugging
-  //     Eigen::Vector3d exploration_vector(goal_camera.x, goal_camera.y, goal_camera.z);
-  //     Eigen::Vector3d exploration_unit = exploration_vector.normalized();
+  //     Eigen::Vector3d goal_vector_camera_frame(goal_camera.x, goal_camera.y, goal_camera.z);
+  //     Eigen::Vector3d exploration_unit = goal_vector_camera_frame.normalized();
       
   //     // Simulate a sample endpoint (e.g., 1m forward in camera frame) to show cost calculation
   //     Eigen::Vector3d sample_endpoint(0.0, 0.0, 1.0);  // 1m forward in camera RDF

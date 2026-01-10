@@ -25,7 +25,7 @@ class ExplorationCost {
   }
 
   double get_distance_to_goal_cost(Eigen::Vector3d endpoint_vector) {
-    return -endpoint_vector.dot(_explorationDirection.normalized());
+    return (_explorationDirection - endpoint_vector).norm();
   }
 
   TravelingCost get_traveling_cost() {
