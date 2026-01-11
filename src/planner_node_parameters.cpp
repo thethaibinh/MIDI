@@ -172,6 +172,11 @@ bool PlannerNode::loadParameters() {
     _mavros_control_mode = MavrosControlModes::KINEMATIC;
   else if (mavros_control_mode_str == "attitude")
     _mavros_control_mode = MavrosControlModes::ATTITUDE;
+  std::string setpoint_type_str = planner_config["setpoint_type"].as<std::string>();
+  if (setpoint_type_str == "position")
+    _setpoint_type = SetpointTypes::POSITION_ONLY;
+  else if (setpoint_type_str == "full")
+    _setpoint_type = SetpointTypes::FULL_STATE;
 
   RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
   return true;

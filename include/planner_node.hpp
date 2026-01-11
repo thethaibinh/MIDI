@@ -207,6 +207,7 @@ class PlannerNode : public rclcpp::Node {
   static constexpr double kPositionJumpTolerance_ = 0.5;
   RuntimeModes _runtime_mode;
   MavrosControlModes _mavros_control_mode;
+  SetpointTypes _setpoint_type;
   double _trajectory_discretisation_cycle, _planning_cycle_time, _2d_z_margin, _replan_factor;
   uint8_t _spiral_sampling_step;
   bool _visualise, _3d_planning, _debug_num_trajectories, _is_spiral_sampling;

@@ -67,3 +67,4 @@ max_acceleration_z: 2.0
 trajectory_discretisation_cycle: 0.01
 go_to_goal_threshold: 1.2 # distance to goal for switching control
 mavros_control_mode: "kinematic"
+setpoint_type: "position" # "position" or "full" control mode, "full" includes velocity and acceleration feedforward
