@@ -49,7 +49,7 @@ sampled_trajectories_threshold: 20000    # Lowered for OmniDrones simulation
 checked_trajectories_threshold: 200    # Lowered - accept trajectory once we have 3 checked
 3d_planning: no                     # Use 2D planning
 2d_z_margin: 0.2
-traveling_cost: "distance"          # "direction" or "distance"
+traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
 debug_num_trajectories: no
 collision_probability_threshold: 5

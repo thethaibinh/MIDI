@@ -478,6 +478,7 @@ void PlannerNode::update_planner_state() {
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
     set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
+    _stop_planning_point_in_world_frame = reference_trajectory_.get_terminal_position_in_world_frame();
   }
   // Land when at goal (MAVROS only)
   else if (_runtime_mode == RuntimeModes::MAVROS &&
@@ -535,7 +536,7 @@ void PlannerNode::track_trajectory() {
   reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
   reference_point.heading = 0.0;
 
-  if (_planner_state == PlanningStates::TAKING_OFF) {
+  if (_planner_state == PlanningStates::TAKING_OFF || (_planner_state == PlanningStates::TRAJECTORY_CONTROL && !had_reference_trajectory)) {
     _reference_trajectory_start_time = command_execution_time;
     steering_value = 0.0f;
     if (_runtime_mode == RuntimeModes::MAVROS)
@@ -548,10 +549,10 @@ void PlannerNode::track_trajectory() {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
     double point_time = trajectory_point_time.seconds();
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
-  } else if (_planner_state == PlanningStates::GO_TO_GOAL) {
+  } else if (_planner_state == PlanningStates::GO_TO_GOAL && had_reference_trajectory) {
     _reference_trajectory_start_time = command_execution_time;
-    steering_value = 0.0f;    
-    reference_point.position = geometryToEigen(reference_trajectory_.get_terminal_position_in_world_frame());
+    steering_value = 0.0f;
+    reference_point.position = geometryToEigen(_stop_planning_point_in_world_frame);
     reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
     reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
     Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));

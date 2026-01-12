@@ -64,12 +64,18 @@ class RandomTrajectorySampler {
     _spiral_leg = 1;
     _spiral_direction = 0;
     _spiral_initialized = false;
-    // Project the exploration vector onto the image plane
-    _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
+    // Get frame dimensions first for clamping
     std::vector<uint16_t> frame_dims = camera.get_frame_dimensions_with_true_radius_margin();
     sampling_range = {
       frame_dims[0], frame_dims[1],
       frame_dims[2], frame_dims[3]};
+    // Project the exploration vector onto the image plane
+    _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
+    // Clamp projected goal to valid sampling range (goal may be off-screen for large lateral offsets)
+    // Cast to int explicitly to avoid type mismatch with std::clamp
+    int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], static_cast<int>(_projected_goal.x())));
+    int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], static_cast<int>(_projected_goal.y())));
+    _projected_goal = Eigen::Vector2i(clamped_x, clamped_y);
     _pixelX = std::uniform_int_distribution<>(sampling_range[0], sampling_range[1]);
     _pixelY = std::uniform_int_distribution<>(sampling_range[2], sampling_range[3]);
   }
@@ -88,7 +94,8 @@ class RandomTrajectorySampler {
     double _scaled_sampled_depth = _depth_upper_bound;
     double sampled_depth = _scaled_sampled_depth;
     Eigen::Vector3d heading_unit_vector(0, 0, 1);
-    Eigen::Vector2i gen_pixel;
+    // Initialize gen_pixel to the clamped projected goal (safe default)
+    Eigen::Vector2i gen_pixel = _projected_goal;
     while (true) {
       if (std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now() - start_sampling_time)
@@ -118,20 +125,23 @@ class RandomTrajectorySampler {
         // Take max depth of this one
         if (pixel_depth_margin < _depth_upper_bound)
           sampled_depth = pixel_depth_margin;
-        
-        if (_exploration_vector.x() < _depth_upper_bound)
-          sampled_depth = std::min(sampled_depth, _exploration_vector.x());
       }
 
       // Calculate heading direction factor using normalized 3D vectors
       Eigen::Vector3d sample_unit_vector = camera.deproject_pixel_to_point(gen_pixel.x(), gen_pixel.y(), sampled_depth).normalized();
       double heading_direction_factor = heading_unit_vector.dot(sample_unit_vector);
       double goal_direction_factor = _exploration_vector.normalized().dot(sample_unit_vector);
-      double _scaled_sampled_depth =
+      // Update the outer _scaled_sampled_depth (don't redeclare with 'double')
+      _scaled_sampled_depth =
         heading_direction_factor *
         (sampled_depth -
          (2 - (goal_direction_factor + 1)) *
            (sampled_depth - _depth_lower_bound) / 2);
+      
+      // Also limit scaled depth to goal distance to prevent overshooting
+      double goal_forward_distance = _exploration_vector.z();
+      if (goal_forward_distance > _depth_lower_bound && goal_forward_distance < _depth_upper_bound)
+        _scaled_sampled_depth = std::min(_scaled_sampled_depth, goal_forward_distance);
 
       if (_3d_planning) break;
 
@@ -167,10 +177,10 @@ class RandomTrajectorySampler {
       _spiral_initialized = true;
     }
     // Generate next point on rectangular spiral
-    gen_pixel = {
+    gen_pixel = Eigen::Vector2i(
       _spiral_center.x() + _spiral_x,
       _spiral_center.y() + _spiral_y
-    };
+    );
     // Move to next position on spiral
     switch (_spiral_direction) {
       case 0:  // Right
@@ -200,11 +210,10 @@ class RandomTrajectorySampler {
         }
         break;
     }
-    // Clamp coordinates to sampling range
-    gen_pixel = {
-      std::clamp(gen_pixel.x(), sampling_range[0], sampling_range[1]),
-      std::clamp(gen_pixel.y(), sampling_range[2], sampling_range[3])
-    };
+    // Clamp coordinates to sampling range - use explicit max/min to avoid type issues
+    int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], gen_pixel.x()));
+    int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], gen_pixel.y()));
+    gen_pixel = Eigen::Vector2i(clamped_x, clamped_y);
     // Reset spiral if we've hit all boundaries
     if (gen_pixel.x() == sampling_range[0] || gen_pixel.x() == sampling_range[1]) {
       if (gen_pixel.y() == sampling_range[2] || gen_pixel.y() == sampling_range[3]) {
