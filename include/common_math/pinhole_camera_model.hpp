@@ -15,6 +15,8 @@
  */
 
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
@@ -83,11 +85,26 @@ class PinholeCamera {
    * coordinates
    */
   Eigen::Vector2i project_point_to_pixel(const Eigen::Vector3d& point) const {
-    double x = point.x() * _focal_length / std::abs(point.z()) + _cx;
-    double y = point.y() * _focal_length / std::abs(point.z()) + _cy;
+    // Handle case where point is too close to camera plane
+    // Use a minimum z value to avoid division by zero or overflow
+    constexpr double MIN_Z = 0.1;  // 10cm minimum
+    double z = point.z();
+    if (std::abs(z) < MIN_Z) {
+      z = (z >= 0) ? MIN_Z : -MIN_Z;
+    }
+    
+    double x = point.x() * _focal_length / z + _cx;
+    double y = point.y() * _focal_length / z + _cy;
 
-    // Round to nearest integer without clamping
-    return Eigen::Vector2i(static_cast<int16_t>(std::round(x)), static_cast<int16_t>(std::round(y)));
+    // Clamp to valid int range to prevent overflow before casting
+    // Use int32 range since we'll clamp to image bounds later anyway
+    constexpr double MAX_PIXEL = 32767.0;
+    constexpr double MIN_PIXEL = -32767.0;
+    x = std::clamp(x, MIN_PIXEL, MAX_PIXEL);
+    y = std::clamp(y, MIN_PIXEL, MAX_PIXEL);
+
+    // Round to nearest integer
+    return Eigen::Vector2i(static_cast<int>(std::round(x)), static_cast<int>(std::round(y)));
   }
 
   void project_point_to_pixel_adding_margin(const Eigen::Vector3d& point,
@@ -95,21 +112,30 @@ class PinholeCamera {
                                             std::vector<double>& out_y) const {
 
     double safety_margin = _true_vehicle_radius * _focal_length / _minimum_clear_distance;
+    double z = point.z();
+    constexpr double MIN_Z_MARGIN = 0.1;  // 10cm minimum
+    if (std::abs(z) < MIN_Z_MARGIN) {
+      z = (z >= 0) ? MIN_Z_MARGIN : -MIN_Z_MARGIN;
+    }
+
+    // Compute projected coordinates with clamping to prevent overflow
+    constexpr double MAX_COORD = 32767.0;  // int16_t max
+    constexpr double MIN_COORD = -32768.0; // int16_t min
 
     // left
-    double left = point.x() * _focal_length / std::abs(point.z()) + _cx - safety_margin;
+    double left = std::clamp(point.x() * _focal_length / z + _cx - safety_margin, MIN_COORD, MAX_COORD);
     out_x.push_back(left);
 
     // right
-    double right = point.x() * _focal_length / std::abs(point.z()) + _cx + safety_margin;
+    double right = std::clamp(point.x() * _focal_length / z + _cx + safety_margin, MIN_COORD, MAX_COORD);
     out_x.push_back(right);
 
     // top
-    double top = point.y() * _focal_length / std::abs(point.z()) + _cy - safety_margin;
+    double top = std::clamp(point.y() * _focal_length / z + _cy - safety_margin, MIN_COORD, MAX_COORD);
     out_y.push_back(top);
 
     // bottom
-    double bottom = point.y() * _focal_length / std::abs(point.z()) + _cy + safety_margin;
+    double bottom = std::clamp(point.y() * _focal_length / z + _cy + safety_margin, MIN_COORD, MAX_COORD);
     out_y.push_back(bottom);
   }
 

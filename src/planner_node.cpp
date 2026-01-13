@@ -545,30 +545,21 @@ void PlannerNode::track_trajectory() {
       // Takeoff to goal altitude at current XY position
       reference_point.position = Eigen::Vector3d(_home_in_world_frame.x, _home_in_world_frame.y, _goal_in_world_frame.z);
     }
-  } else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) {
+  } else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) || _planner_state == PlanningStates::GO_TO_GOAL) {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
     double point_time = trajectory_point_time.seconds();
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
-  } else if (_planner_state == PlanningStates::GO_TO_GOAL && had_reference_trajectory) {
-    _reference_trajectory_start_time = command_execution_time;
-    steering_value = 0.0f;
-    reference_point.position = geometryToEigen(_stop_planning_point_in_world_frame);
-    reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
-    reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
-    Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
-    reference_point.heading = current_euler_angles(2);
   }
 
   // Publish position/velocity setpoint (kinematic control mode)
-  // For MAVROS and OmniDrones, we only support KINEMATIC mode
-  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
+  if (_runtime_mode == RuntimeModes::MAVROS) {
     public_ref_pos(reference_point);
   } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones supports both position and velocity control
     // Use PositionTarget for full state control (position + velocity + acceleration)
     public_ref_pos(reference_point);
     // Also publish velocity command for velocity-only control mode
-    publish_velocity_command(reference_point);
+    // publish_velocity_command(reference_point);
   }
 }
 

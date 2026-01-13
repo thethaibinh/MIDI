@@ -68,14 +68,24 @@ class RandomTrajectorySampler {
     std::vector<uint16_t> frame_dims = camera.get_frame_dimensions_with_true_radius_margin();
     sampling_range = {
       frame_dims[0], frame_dims[1],
-      frame_dims[2], frame_dims[3]};
-    // Project the exploration vector onto the image plane
-    _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
-    // Clamp projected goal to valid sampling range (goal may be off-screen for large lateral offsets)
-    // Cast to int explicitly to avoid type mismatch with std::clamp
-    int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], static_cast<int>(_projected_goal.x())));
-    int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], static_cast<int>(_projected_goal.y())));
-    _projected_goal = Eigen::Vector2i(clamped_x, clamped_y);
+      frame_dims[2], frame_dims[3]
+    };
+    // If goal is too close to camera, use image center as projection
+    if (abs(goal_vector_camera_frame.z()) <= 0.1) {
+      // Goal is too close - use image center
+      _projected_goal = Eigen::Vector2i(
+        (sampling_range[0] + sampling_range[1]) / 2,
+        (sampling_range[2] + sampling_range[3]) / 2);
+      std::cerr << "[MIDI] Warning: Goal is too close to camera (z=" 
+                << goal_vector_camera_frame.z() << "), using image center" << std::endl;
+    } else {
+      // Project the exploration vector onto the image plane
+      _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
+      // Clamp projected goal to valid sampling range (goal may be off-screen for large lateral offsets)
+      int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], static_cast<int>(_projected_goal.x())));
+      int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], static_cast<int>(_projected_goal.y())));
+      _projected_goal = Eigen::Vector2i(clamped_x, clamped_y);
+    }
     _pixelX = std::uniform_int_distribution<>(sampling_range[0], sampling_range[1]);
     _pixelY = std::uniform_int_distribution<>(sampling_range[2], sampling_range[3]);
   }
@@ -108,8 +118,15 @@ class RandomTrajectorySampler {
       else
         gen_pixel = camera.clamp_to_frame_with_margin(_pixelX(_gen), _pixelY(_gen));
       
+      // Bounds check before depth access
+      int pixel_index = gen_pixel.y() * camera.get_width() + gen_pixel.x();      
       // Get raw depth value
-      double raw_depth = _depth_data[gen_pixel.y() * camera.get_width() + gen_pixel.x()];
+      double raw_depth = _depth_data[pixel_index];
+      
+      // Check for NaN or invalid depth values - skip this pixel if invalid
+      if (!std::isfinite(raw_depth) || raw_depth <= 0.0) {
+        continue;
+      }
       
       // If raw depth is less than true vehicle radius, it's likely from props/frame or invalid
       // Treat as free space and use lower bound depth
@@ -130,13 +147,25 @@ class RandomTrajectorySampler {
       // Calculate heading direction factor using normalized 3D vectors
       Eigen::Vector3d sample_unit_vector = camera.deproject_pixel_to_point(gen_pixel.x(), gen_pixel.y(), sampled_depth).normalized();
       double heading_direction_factor = heading_unit_vector.dot(sample_unit_vector);
-      double goal_direction_factor = _exploration_vector.normalized().dot(sample_unit_vector);
+      
+      // Safe normalization of exploration vector - avoid NaN if vector is near-zero
+      double exploration_norm = _exploration_vector.norm();
+      double goal_direction_factor = 0.0;
+      if (exploration_norm > 1e-6) {
+        goal_direction_factor = (_exploration_vector / exploration_norm).dot(sample_unit_vector);
+      }
+      
       // Update the outer _scaled_sampled_depth (don't redeclare with 'double')
       _scaled_sampled_depth =
         heading_direction_factor *
         (sampled_depth -
          (2 - (goal_direction_factor + 1)) *
            (sampled_depth - _depth_lower_bound) / 2);
+      
+      // Safety check: ensure scaled depth is valid
+      if (!std::isfinite(_scaled_sampled_depth) || _scaled_sampled_depth <= 0.0) {
+        _scaled_sampled_depth = _depth_lower_bound;
+      }
       
       // Also limit scaled depth to goal distance to prevent overshooting
       double goal_forward_distance = _exploration_vector.z();

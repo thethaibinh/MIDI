@@ -327,11 +327,21 @@ class SecondOrderSegment : public Segment {
       }
     }
 
-    // Find the maximum and minimum elements
-    int16_t min_projected_x = static_cast<int16_t>(*std::min_element(projected_adding_margin_x_coords.begin(), projected_adding_margin_x_coords.end()));
-    int16_t max_projected_x = static_cast<int16_t>(*std::max_element(projected_adding_margin_x_coords.begin(), projected_adding_margin_x_coords.end()));
-    int16_t min_projected_y = static_cast<int16_t>(*std::min_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
-    int16_t max_projected_y = static_cast<int16_t>(*std::max_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
+    // Check if any valid projections were computed
+    if (projected_adding_margin_x_coords.empty() || projected_adding_margin_y_coords.empty()) {
+      // Return empty boundary to indicate invalid projection
+      return std::vector<int16_t>();
+    }
+
+    // Find the maximum and minimum elements with safe clamping
+    auto clamp_to_int16 = [](double val) -> int16_t {
+      return static_cast<int16_t>(std::clamp(val, -32768.0, 32767.0));
+    };
+    
+    int16_t min_projected_x = clamp_to_int16(*std::min_element(projected_adding_margin_x_coords.begin(), projected_adding_margin_x_coords.end()));
+    int16_t max_projected_x = clamp_to_int16(*std::max_element(projected_adding_margin_x_coords.begin(), projected_adding_margin_x_coords.end()));
+    int16_t min_projected_y = clamp_to_int16(*std::min_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
+    int16_t max_projected_y = clamp_to_int16(*std::max_element(projected_adding_margin_y_coords.begin(), projected_adding_margin_y_coords.end()));
     std::vector<int16_t> projection_boundary = {min_projected_x, min_projected_y, max_projected_x, max_projected_y};
     return projection_boundary;
   }
