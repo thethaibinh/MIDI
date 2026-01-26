@@ -665,8 +665,8 @@ void PlannerNode::get_reference_point_at_time(
   Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
 
   // Comment to turn off steering
-  // if (fabs(steering_value) > 1e-6)
-  //   reference_point.heading = current_euler_angles(2) + steering_value;
+  if (fabs(steering_value) > 1e-6)
+    reference_point.heading = current_euler_angles(2) + steering_value;
 
   reference_point.position = geometryToEigen(position_in_world_frame);
   reference_point.velocity = geometryToEigen(velocity_in_world_frame);
