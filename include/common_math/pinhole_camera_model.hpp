@@ -87,7 +87,7 @@ class PinholeCamera {
   Eigen::Vector2i project_point_to_pixel(const Eigen::Vector3d& point) const {
     // Handle case where point is too close to camera plane
     // Use a minimum z value to avoid division by zero or overflow
-    constexpr double MIN_Z = 0.1;  // 10cm minimum
+    constexpr double MIN_Z = 0.01;  // 1cm minimum
     double z = point.z();
     if (std::abs(z) < MIN_Z) {
       z = (z >= 0) ? MIN_Z : -MIN_Z;
@@ -113,7 +113,7 @@ class PinholeCamera {
 
     double safety_margin = _true_vehicle_radius * _focal_length / _minimum_clear_distance;
     double z = point.z();
-    constexpr double MIN_Z_MARGIN = 0.1;  // 10cm minimum
+    constexpr double MIN_Z_MARGIN = 0.01;  // 1cm minimum
     if (std::abs(z) < MIN_Z_MARGIN) {
       z = (z >= 0) ? MIN_Z_MARGIN : -MIN_Z_MARGIN;
     }

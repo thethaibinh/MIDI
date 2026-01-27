@@ -71,21 +71,21 @@ class RandomTrajectorySampler {
       frame_dims[2], frame_dims[3]
     };
     // If goal is too close to camera, use image center as projection
-    if (abs(goal_vector_camera_frame.z()) <= 0.1) {
-      // Goal is too close - use image center
-      _projected_goal = Eigen::Vector2i(
-        (sampling_range[0] + sampling_range[1]) / 2,
-        (sampling_range[2] + sampling_range[3]) / 2);
-      std::cerr << "[MIDI] Warning: Goal is too close to camera (z=" 
-                << goal_vector_camera_frame.z() << "), using image center" << std::endl;
-    } else {
-      // Project the exploration vector onto the image plane
-      _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
-      // Clamp projected goal to valid sampling range (goal may be off-screen for large lateral offsets)
-      int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], static_cast<int>(_projected_goal.x())));
-      int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], static_cast<int>(_projected_goal.y())));
-      _projected_goal = Eigen::Vector2i(clamped_x, clamped_y);
-    }
+    // if (abs(goal_vector_camera_frame.z()) <= 0.1) {
+    //   // Goal is too close - use image center
+    //   _projected_goal = Eigen::Vector2i(
+    //     (sampling_range[0] + sampling_range[1]) / 2,
+    //     (sampling_range[2] + sampling_range[3]) / 2);
+    //   std::cerr << "[MIDI] Warning: Goal is too close to camera (z=" 
+    //             << goal_vector_camera_frame.z() << "), using image center" << std::endl;
+    // } else {
+    // Project the exploration vector onto the image plane
+    _projected_goal = camera.project_point_to_pixel(goal_vector_camera_frame);
+    // Clamp projected goal to valid sampling range (goal may be off-screen for large lateral offsets)
+    int clamped_x = std::max(sampling_range[0], std::min(sampling_range[1], static_cast<int>(_projected_goal.x())));
+    int clamped_y = std::max(sampling_range[2], std::min(sampling_range[3], static_cast<int>(_projected_goal.y())));
+    _projected_goal = Eigen::Vector2i(clamped_x, clamped_y);
+    // }
     _pixelX = std::uniform_int_distribution<>(sampling_range[0], sampling_range[1]);
     _pixelY = std::uniform_int_distribution<>(sampling_range[2], sampling_range[3]);
   }
