@@ -52,7 +52,7 @@ collision_probability_threshold: 5
 # Sampling parameters
 depth_upper_bound: 2.0
 depth_lower_bound: 1.5
-depth_sampling_margin: 0.2
+depth_sampling_margin: 0.7
 is_spiral_sampling: no
 spiral_sampling_step: 3
 # Kinematic constraints in camera coordinate (Right-Down-Forward)

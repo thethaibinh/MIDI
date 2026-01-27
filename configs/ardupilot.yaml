@@ -55,7 +55,7 @@ minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
 # Sampling parameters
 depth_upper_bound: 5.0              # Max depth to plan ahead (m)
 depth_lower_bound: 1.5              # Min depth to plan ahead (m)
-depth_sampling_margin: 0.3
+depth_sampling_margin: 0.7
 is_spiral_sampling: no
 spiral_sampling_step: 3
 
