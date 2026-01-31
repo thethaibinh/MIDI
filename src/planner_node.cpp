@@ -122,7 +122,9 @@ pointcloud_type* PlannerNode::create_point_cloud(const sm::Image::SharedPtr dept
   double fy = _real_focal_length;
 
   pointcloud_type* cloud (new pointcloud_type());
-  cloud->header.stamp     = rclcpp::Time(depth_msg->header.stamp).nanoseconds() / 1000;
+  // Use node's current time (respects use_sim_time) instead of depth_msg timestamp
+  // This ensures TF lookup works when mixing real camera (wall time) with SITL (sim time)
+  cloud->header.stamp     = this->now().nanoseconds() / 1000;
   cloud->header.frame_id  = _vehicle_frame;
   cloud->is_dense         = false;
   cloud->height = depth_mat.rows;
@@ -940,8 +942,9 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
   pointcloud_type* cloud = create_point_cloud(depth_msg);
   sensor_msgs::msg::PointCloud2 cloudMessage;
   pcl::toROSMsg(*cloud, cloudMessage);
-  // Set header for RViz visualization (pcl::toROSMsg should copy this, but ensure it's set)
-  cloudMessage.header.stamp = depth_msg->header.stamp;
+  // Use node's current time (respects use_sim_time) for TF compatibility
+  // when mixing real camera (wall time) with SITL (sim time)
+  cloudMessage.header.stamp = this->now();
   cloudMessage.header.frame_id = _vehicle_frame;
   point_cloud_pub->publish(cloudMessage);
   delete cloud;  // Free memory
