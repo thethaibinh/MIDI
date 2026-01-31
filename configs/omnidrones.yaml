@@ -47,7 +47,7 @@ acc_planning_threshold: 0.1
 vel_planning_threshold: 0.4          # New: Lateral and vertical velocity threshold (m/s)
 sampled_trajectories_threshold: 20000    # Lowered for OmniDrones simulation
 checked_trajectories_threshold: 200    # Lowered - accept trajectory once we have 3 checked
-3d_planning: no                     # Use 2D planning
+3d_planning: yes                 # Use 3D planning
 2d_z_margin: 0.2
 traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
