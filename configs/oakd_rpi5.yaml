@@ -53,6 +53,15 @@ true_vehicle_radius: 0.33           # Actual radius including propellers (m)
 planning_vehicle_radius: 0.48       # Safety margin for planning (m)
 minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
 
+# Fence/world limits (keep drone within safe bounds)
+fence_limits:
+  min_x: -2.0
+  max_x: 5.0
+  min_y: -2.0
+  max_y: 2.0
+  min_z: 0.4
+  max_z: 2.5
+
 # SSTO trajectory generation parameters
 # Sampling parameters
 depth_upper_bound: 2.0              # Max depth to plan ahead (m)

@@ -148,6 +148,16 @@ bool PlannerNode::loadParameters() {
   _planning_vehicle_radius = planner_config["planning_vehicle_radius"].as<double>();
   _minimum_clear_distance = planner_config["minimum_clear_distance"].as<double>();
 
+  // Fence/world limits (keep drone within safe bounds)
+  _fence_min_x = planner_config["fence_limits"]["min_x"].as<double>();
+  _fence_max_x = planner_config["fence_limits"]["max_x"].as<double>();
+  _fence_min_y = planner_config["fence_limits"]["min_y"].as<double>();
+  _fence_max_y = planner_config["fence_limits"]["max_y"].as<double>();
+  _fence_min_z = planner_config["fence_limits"]["min_z"].as<double>();
+  _fence_max_z = planner_config["fence_limits"]["max_z"].as<double>();
+  RCLCPP_INFO(this->get_logger(), "Fence limits: X[%.1f, %.1f], Y[%.1f, %.1f], Z[%.1f, %.1f]",
+              _fence_min_x, _fence_max_x, _fence_min_y, _fence_max_y, _fence_min_z, _fence_max_z);
+
   // SSTO trajectory generation parameters
   _depth_upper_bound = planner_config["depth_upper_bound"].as<double>();
   _depth_lower_bound = planner_config["depth_lower_bound"].as<double>();

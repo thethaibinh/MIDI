@@ -48,6 +48,15 @@ planning_vehicle_radius: 0.20
 minimum_clear_distance: 1.0
 collision_probability_threshold: 5
 
+# Fence/world limits (keep drone within safe bounds)
+fence_limits:
+  min_x: -1000.0
+  max_x: 1000.0
+  min_y: -1000.0
+  max_y: 1000.0
+  min_z: -1000.0
+  max_z: 1000.0
+
 # SSTO trajectory generation parameters
 # Sampling parameters
 depth_upper_bound: 2.0

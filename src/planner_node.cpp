@@ -566,6 +566,19 @@ void PlannerNode::track_trajectory() {
 }
 
 void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
+  // Check fence limits - reject setpoints outside safe bounds
+  const double x = reference_point.position(0);
+  const double y = reference_point.position(1);
+  const double z = reference_point.position(2);
+  
+  if (x < _fence_min_x || x > _fence_max_x ||
+      y < _fence_min_y || y > _fence_max_y ||
+      z < _fence_min_z || z > _fence_max_z) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "Setpoint (%.2f, %.2f, %.2f) outside fence limits, not publishing", x, y, z);
+    return;
+  }
+  
   mavros_msgs::msg::PositionTarget msg;
   msg.header.stamp = this->now();
   msg.coordinate_frame = 1;  // FRAME_LOCAL_NED

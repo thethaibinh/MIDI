@@ -229,6 +229,11 @@ class PlannerNode : public rclcpp::Node {
   double _planning_vehicle_radius;
   double _minimum_clear_distance;
   
+  // Fence/world limits (to keep drone within safe bounds)
+  double _fence_min_x, _fence_max_x;
+  double _fence_min_y, _fence_max_y;
+  double _fence_min_z, _fence_max_z;
+  
   // Benchmark tracking
   int32_t _current_trial_id = 0;
   rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
