@@ -85,7 +85,7 @@ PlannerNode::PlannerNode()
     std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
 
   mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
-    "mavros/state", 10,
+    "/mavros/state", 10,
     std::bind(&PlannerNode::ardupilot_status_callback, this, std::placeholders::_1));
 
   mav_pose_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
