@@ -104,7 +104,7 @@ PlannerNode::PlannerNode()
   arming_srv = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
   takeoff_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
   land_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
-  mode_srv = this->create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
+  mode_srv = this->create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
 
   // Timer
   control_loop_timer_ = this->create_wall_timer(
@@ -470,6 +470,9 @@ void PlannerNode::update_planner_state() {
       (_goal_set || takeoff_requested_)) {
     // Step 1: Switch to GUIDED mode if not already
     if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "Attempting GUIDED mode switch... current mode: '%s', service ready: %d",
+        flight_controller_status.mode.c_str(), mode_srv->service_is_ready());
       if (mode_srv->service_is_ready()) {
         auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
         request->custom_mode = "GUIDED";
