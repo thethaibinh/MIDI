@@ -248,9 +248,9 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
   bool _trial_started = false;
   
-  // Odom throttle for zenoh (100Hz -> 1Hz)
+  // Odom throttle for zenoh (100Hz -> 10Hz)
   rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
-  static constexpr double kOdomThrottleInterval_ = 0.01;  // 1 Hz
+  static constexpr double kOdomThrottleInterval_ = 0.1;  // 10 Hz
 };
 
 #endif  // PLANNER_NODE_HPP

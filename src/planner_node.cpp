@@ -91,10 +91,14 @@ PlannerNode::PlannerNode()
 
   // For MAVROS mode: also subscribe to raw odom to throttle it for zenoh
   if (_runtime_mode == RuntimeModes::MAVROS) {
+    // MAVROS publishes odom with BEST_EFFORT QoS
+    rclcpp::QoS mavros_qos(5);
+    mavros_qos.best_effort();
+    
     mavros_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "/mavros/local_position/odom", 5,
+      "/mavros/local_position/odom", mavros_qos,
       [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-        // Throttle from 100Hz to 1Hz
+        // Throttle from 100Hz to 10Hz
         rclcpp::Time now = this->now();
         if ((now - last_odom_throttle_time_).seconds() >= kOdomThrottleInterval_) {
           odom_throttled_pub_->publish(*msg);
