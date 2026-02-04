@@ -55,6 +55,8 @@
 #include <ground_system_msgs/msg/start_swarm_mission.hpp>
 #include <ground_system_msgs/msg/fbv_goal.hpp>
 #include <ground_system_msgs/msg/benchmark_status.hpp>
+#include <ground_system_msgs/msg/takeoff.hpp>
+#include <ground_system_msgs/msg/fly_to.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -123,6 +125,8 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
   rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub;
   rclcpp::Subscription<ground_system_msgs::msg::FBVGoal>::SharedPtr fbv_goal_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::Takeoff>::SharedPtr takeoff_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::FlyTo>::SharedPtr fly_to_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
@@ -174,6 +178,8 @@ class PlannerNode : public rclcpp::Node {
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
   void fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg);
+  void takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg);
+  void fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void img_callback(const sm::Image::SharedPtr depth_msg);
   void visualise(const sm::Image::SharedPtr depth_msg);

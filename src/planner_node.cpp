@@ -64,6 +64,16 @@ PlannerNode::PlannerNode()
     "/fbv_goal", 10,
     std::bind(&PlannerNode::fbv_goal_callback, this, std::placeholders::_1));
 
+  // Takeoff command subscriber - triggers takeoff only (no goal)
+  takeoff_sub = this->create_subscription<ground_system_msgs::msg::Takeoff>(
+    "/takeoff", 10,
+    std::bind(&PlannerNode::takeoff_callback, this, std::placeholders::_1));
+
+  // FlyTo command subscriber - auto takeoff and fly to specified goal
+  fly_to_sub = this->create_subscription<ground_system_msgs::msg::FlyTo>(
+    "/fly_to", 10,
+    std::bind(&PlannerNode::fly_to_callback, this, std::placeholders::_1));
+
   reset_sub = this->create_subscription<std_msgs::msg::Empty>(
     "/reset_planner", 10,
     std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1));
@@ -251,6 +261,82 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
     // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
     RCLCPP_WARN(this->get_logger(), "[MAVROS/FBV] Goal received, initiating flight sequence to '%s'...",
                 msg->target_label.c_str());
+  }
+}
+
+void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received takeoff command: altitude = %.2f m", msg->altitude);
+  
+  if (_planner_state != PlanningStates::OFF) {
+    RCLCPP_WARN(this->get_logger(), "Planner not in OFF state, ignoring takeoff command");
+    return;
+  }
+  
+  // Set takeoff altitude in goal_up_coordinate (used by update_planner_state for takeoff)
+  _goal_up_coordinate = msg->altitude;
+  
+  // NOTE: For takeoff-only, we do NOT set _goal_set or mission_received_
+  // This allows the planner to just takeoff and hover
+  
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Simulation mode: directly start takeoff
+    RCLCPP_WARN(this->get_logger(), "[SIM] Starting takeoff to %.2f m!", msg->altitude);
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    _home_in_world_frame = _state.pose.position;
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence
+    RCLCPP_WARN(this->get_logger(), "[MAVROS] Takeoff command received, initiating takeoff to %.2f m...",
+                msg->altitude);
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+  }
+}
+
+void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received fly_to command: (%.2f, %.2f, %.2f) NWU", 
+              msg->x, msg->y, msg->z);
+  
+  if (mission_received_) {
+    RCLCPP_WARN(this->get_logger(), "Mission already in progress, ignoring fly_to command");
+    return;
+  }
+  
+  // FlyTo coordinates are in NWU world frame (absolute position)
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones: NWU world frame, direct mapping
+    _goal_in_world_frame.x = msg->x;  // North
+    _goal_in_world_frame.y = msg->y;  // West
+    _goal_in_world_frame.z = msg->z;  // Up
+  } else {
+    // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
+    // Convert from NWU: East=-West, North=North
+    _goal_in_world_frame.x = -msg->y;  // East = -West
+    _goal_in_world_frame.y = msg->x;   // North = North
+    _goal_in_world_frame.z = msg->z;   // Up = Up
+  }
+  
+  RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame: (%.2f, %.2f, %.2f)",
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
+  _goal_set = true;
+  mission_received_ = true;
+  
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // Simulation mode: directly start trajectory control
+    RCLCPP_WARN(this->get_logger(), "[SIM/FLY_TO] Starting navigation!");
+    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    _home_in_world_frame = _state.pose.position;
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
+    RCLCPP_WARN(this->get_logger(), "[MAVROS/FLY_TO] Goal received, initiating flight sequence...");
   }
 }
 
