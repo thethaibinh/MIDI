@@ -120,6 +120,7 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr raw_ref_pos_pub;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr vel_cmd_pub;
   rclcpp::Publisher<ground_system_msgs::msg::BenchmarkStatus>::SharedPtr benchmark_status_pub;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_throttled_pub_;  // Throttled odom for zenoh
   
   rclcpp::Subscription<sm::Image>::SharedPtr image_sub;
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
@@ -129,6 +130,7 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<ground_system_msgs::msg::FlyTo>::SharedPtr fly_to_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr mavros_odom_sub_;  // For throttling
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mav_pose_sub;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr mav_twist_sub;
@@ -245,6 +247,10 @@ class PlannerNode : public rclcpp::Node {
   int32_t _current_trial_id = 0;
   rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
   bool _trial_started = false;
+  
+  // Odom throttle for zenoh (100Hz -> 1Hz)
+  rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
+  static constexpr double kOdomThrottleInterval_ = 0.01;  // 1 Hz
 };
 
 #endif  // PLANNER_NODE_HPP

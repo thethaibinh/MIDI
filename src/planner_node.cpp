@@ -42,6 +42,11 @@ PlannerNode::PlannerNode()
     // Velocity-only setpoints (TwistStamped) - alternative control mode
     vel_cmd_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>("mavros/setpoint_velocity/cmd_vel", 10);
   }
+  if (_runtime_mode == RuntimeModes::MAVROS) {
+    // Throttled odom for zenoh bridge (100Hz -> 1Hz)
+    odom_throttled_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
+      "/mavros/local_position/odom_throttled", 5);
+  }
 
   // Subscribers
   image_sub = this->create_subscription<sm::Image>(
@@ -81,8 +86,22 @@ PlannerNode::PlannerNode()
   // Subscribe to odometry - use relative topic so namespace remapping works
   // When running in /Drone1 namespace, this becomes /Drone1/odometry
   odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(
-    "odometry", 10,
+    "odometry", 5,
     std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
+
+  // For MAVROS mode: also subscribe to raw odom to throttle it for zenoh
+  if (_runtime_mode == RuntimeModes::MAVROS) {
+    mavros_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      "/mavros/local_position/odom", 5,
+      [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+        // Throttle from 100Hz to 1Hz
+        rclcpp::Time now = this->now();
+        if ((now - last_odom_throttle_time_).seconds() >= kOdomThrottleInterval_) {
+          odom_throttled_pub_->publish(*msg);
+          last_odom_throttle_time_ = now;
+        }
+      });
+  }
 
   mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
     "/mavros/state", 10,
