@@ -289,10 +289,11 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
     reference_trajectory_ = ruckig::Trajectory<3>();
     had_reference_trajectory = false;
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
-    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence
+    // Real FC mode: set flag to trigger GUIDED->ARM->TAKEOFF sequence in update_planner_state()
+    // Do NOT immediately change state - let the FC sequence complete first
     RCLCPP_WARN(this->get_logger(), "[MAVROS] Takeoff command received, initiating takeoff to %.2f m...",
                 msg->altitude);
-    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+    takeoff_requested_ = true;
   }
 }
 
@@ -352,6 +353,7 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   arming_pending_ = false;
   takeoff_pending_ = false;
   land_pending_ = false;
+  takeoff_requested_ = false;
   trajectory_queue_.clear();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
@@ -463,7 +465,9 @@ void PlannerNode::control_loop() {
 
 void PlannerNode::update_planner_state() {
   // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && _goal_set) {
+  // Trigger on either _goal_set (mission/fly_to) or takeoff_requested_ (takeoff-only)
+  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
+      (_goal_set || takeoff_requested_)) {
     // Step 1: Switch to GUIDED mode if not already
     if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
       if (mode_srv->service_is_ready()) {
@@ -518,7 +522,8 @@ void PlannerNode::update_planner_state() {
     if (flight_controller_status.mode == "GUIDED" && flight_controller_status.armed && !takeoff_pending_) {
       if (takeoff_srv->service_is_ready()) {
         auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
-        request->altitude = _goal_in_world_frame.z;
+        // Use goal altitude if set, otherwise use _goal_up_coordinate (from takeoff command)
+        request->altitude = _goal_set ? _goal_in_world_frame.z : _goal_up_coordinate;
         takeoff_pending_ = true;
         
         takeoff_srv->async_send_request(request,
@@ -542,8 +547,10 @@ void PlannerNode::update_planner_state() {
   }
 
   // Handle disarm detection (for real FC)
+  // Only reset if we were actually flying (TRAJECTORY_CONTROL or later), not during startup
   if (_runtime_mode == RuntimeModes::MAVROS && 
       _planner_state != PlanningStates::OFF &&
+      _planner_state != PlanningStates::TAKING_OFF &&
       !flight_controller_status.armed) {
     RCLCPP_WARN(this->get_logger(), "Vehicle disarmed, resetting planner");
     reset_callback(nullptr);

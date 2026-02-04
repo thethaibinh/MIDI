@@ -146,6 +146,7 @@ class PlannerNode : public rclcpp::Node {
   std::atomic<bool> arming_pending_{false};
   std::atomic<bool> takeoff_pending_{false};
   std::atomic<bool> land_pending_{false};
+  std::atomic<bool> takeoff_requested_{false};  // Triggers GUIDED->ARM->TAKEOFF without goal
   
   rclcpp::TimerBase::SharedPtr control_loop_timer_;
   
