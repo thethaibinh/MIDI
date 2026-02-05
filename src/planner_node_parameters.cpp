@@ -126,6 +126,11 @@ bool PlannerNode::loadParameters() {
   _checking_time_ratio = planner_config["checking_time_ratio"].as<double>();
   _acc_planning_threshold = planner_config["acc_planning_threshold"].as<double>();
   _vel_planning_threshold = planner_config["vel_planning_threshold"].as<double>();
+  
+  // Data freshness thresholds
+  _depth_age_threshold = planner_config["depth_age_threshold"].as<double>();
+  _state_age_threshold = planner_config["state_age_threshold"].as<double>();
+  _transform_age_threshold = planner_config["transform_age_threshold"].as<double>();
   _checked_trajectories_threshold = planner_config["checked_trajectories_threshold"].as<int>();
   _3d_planning = planner_config["3d_planning"].as<bool>();
   _2d_z_margin = planner_config["2d_z_margin"].as<double>();

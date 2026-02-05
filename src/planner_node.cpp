@@ -36,14 +36,15 @@ PlannerNode::PlannerNode()
   // Publishers based on runtime mode
   if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
     // Position/velocity/acceleration setpoints (PositionTarget)
-    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("mavros/setpoint_raw/local", 10);
+    // Use absolute path since MAVROS is at root namespace, not Drone1 namespace
+    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", 10);
   }
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // Velocity-only setpoints (TwistStamped) - alternative control mode
     vel_cmd_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>("mavros/setpoint_velocity/cmd_vel", 10);
   }
   if (_runtime_mode == RuntimeModes::MAVROS) {
-    // Throttled odom for zenoh bridge (100Hz -> 1Hz)
+    // Throttled odom for zenoh bridge (100Hz -> 10Hz)
     odom_throttled_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
       "/mavros/local_position/odom_throttled", 5);
   }
@@ -91,7 +92,8 @@ PlannerNode::PlannerNode()
 
   // For MAVROS mode: also subscribe to raw odom to throttle it for zenoh
   if (_runtime_mode == RuntimeModes::MAVROS) {
-    // MAVROS publishes odom with BEST_EFFORT QoS
+    // MAVROS publishes with BEST_EFFORT QoS - must match for subscription to work
+    // Use absolute paths since MAVROS is at root namespace, not Drone1 namespace
     rclcpp::QoS mavros_qos(5);
     mavros_qos.best_effort();
     
@@ -105,30 +107,30 @@ PlannerNode::PlannerNode()
           last_odom_throttle_time_ = now;
         }
       });
-  }
 
-  mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
-    "/mavros/state", 10,
-    std::bind(&PlannerNode::ardupilot_status_callback, this, std::placeholders::_1));
-
+    // Pose/twist/accel also use BEST_EFFORT QoS from MAVROS
   mav_pose_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-    "mavros/local_position/pose", 10,
+      "/mavros/local_position/pose", mavros_qos,
     std::bind(&PlannerNode::mav_pose_callback, this, std::placeholders::_1));
 
   mav_twist_sub = this->create_subscription<geometry_msgs::msg::TwistStamped>(
-    "mavros/local_position/velocity_body", 10,
+      "/mavros/local_position/velocity_body", mavros_qos,
     std::bind(&PlannerNode::mav_twist_callback, this, std::placeholders::_1));
 
-  mav_accel_sub = this->create_subscription<sensor_msgs::msg::Imu>(
-    "mavros/imu/data_raw", 10,
-    std::bind(&PlannerNode::mav_accel_callback, this, std::placeholders::_1));
+    // mav_accel_sub = this->create_subscription<sensor_msgs::msg::Imu>(
+    //   "/mavros/imu/data_raw", mavros_qos,
+    //   std::bind(&PlannerNode::mav_accel_callback, this, std::placeholders::_1));
 
-  // MAVROS service clients (for real FC)
-  arming_srv = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
-  takeoff_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
-  land_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
-  mode_srv = this->create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
+    mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
+      "/mavros/state", 10,
+      std::bind(&PlannerNode::ardupilot_status_callback, this, std::placeholders::_1));
 
+    // MAVROS service clients (for real FC) - use absolute paths since services are at root namespace
+    arming_srv = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
+    takeoff_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
+    land_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
+    mode_srv = this->create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
+  }
   // Timer
   control_loop_timer_ = this->create_wall_timer(
     std::chrono::duration<double>(_trajectory_discretisation_cycle),
@@ -323,6 +325,8 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
 void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg) {
   RCLCPP_INFO(this->get_logger(), "Received fly_to command: (%.2f, %.2f, %.2f) NWU", 
               msg->x, msg->y, msg->z);
+  RCLCPP_INFO(this->get_logger(), "Current position (from _state): (%.2f, %.2f, %.2f)",
+              _state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
   
   if (mission_received_) {
     RCLCPP_WARN(this->get_logger(), "Mission already in progress, ignoring fly_to command");
@@ -330,20 +334,21 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
   }
   
   // FlyTo coordinates are in NWU world frame (absolute position)
+  // Convert based on runtime mode's internal coordinate convention
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // OmniDrones: NWU world frame, direct mapping
+    // OmniDrones uses NWU internally, no conversion needed
     _goal_in_world_frame.x = msg->x;  // North
     _goal_in_world_frame.y = msg->y;  // West
     _goal_in_world_frame.z = msg->z;  // Up
   } else {
-    // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
-    // Convert from NWU: East=-West, North=North
+    // MAVROS uses ENU internally
+    // NWU -> ENU: X_enu = -Y_nwu (East = -West), Y_enu = X_nwu (North), Z same
     _goal_in_world_frame.x = -msg->y;  // East = -West
-    _goal_in_world_frame.y = msg->x;   // North = North
-    _goal_in_world_frame.z = msg->z;   // Up = Up
+    _goal_in_world_frame.y = msg->x;   // North
+    _goal_in_world_frame.z = msg->z;   // Up
   }
   
-  RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame: (%.2f, %.2f, %.2f)",
+  RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame (NWU for OmniDrones, ENU for MAVROS): (%.2f, %.2f, %.2f)",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
   _goal_set = true;
   mission_received_ = true;
@@ -589,6 +594,11 @@ void PlannerNode::update_planner_state() {
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
 
+  // Debug: print state transition values
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //     "State check: current_z=%.2f, goal_z=%.2f, threshold=%.2f, state=%d",
+  //     _state.pose.position.z, _goal_in_world_frame.z, _goal_in_world_frame.z - 0.1, (int)_planner_state);
+
   // Transition from START to TRAJECTORY_CONTROL when altitude reached
   if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::TAKING_OFF) {
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
@@ -685,7 +695,14 @@ void PlannerNode::track_trajectory() {
 }
 
 void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
-  // Check fence limits - reject setpoints outside safe bounds
+  // Debug: Log current state, goal, and setpoint for coordinate debugging
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //   "DEBUG COORDS - State: (%.2f, %.2f, %.2f) | Goal: (%.2f, %.2f, %.2f) | Setpoint: (%.2f, %.2f, %.2f)",
+  //   _state.pose.position.x, _state.pose.position.y, _state.pose.position.z,
+  //   _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
+  //   reference_point.position(0), reference_point.position(1), reference_point.position(2));
+  
+  // Check fence limits - reject setpoints outside safe bounds (in ENU)
   const double x = reference_point.position(0);
   const double y = reference_point.position(1);
   const double z = reference_point.position(2);
@@ -694,18 +711,23 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
       y < _fence_min_y || y > _fence_max_y ||
       z < _fence_min_z || z > _fence_max_z) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      "Setpoint (%.2f, %.2f, %.2f) outside fence limits, not publishing", x, y, z);
+      "Setpoint (%.2f, %.2f, %.2f) ENU outside fence limits, not publishing", x, y, z);
     return;
   }
   
   mavros_msgs::msg::PositionTarget msg;
   msg.header.stamp = this->now();
-  msg.coordinate_frame = 1;  // FRAME_LOCAL_NED
+  msg.coordinate_frame = 1;  // FRAME_LOCAL_NED (but MAVROS actually accepts ENU here - legacy behavior)
   msg.type_mask = 0;
+  
+  // MAVROS setpoint_raw/local accepts ENU directly despite coordinate_frame=NED (legacy quirk)
   msg.position.x = reference_point.position(0);
   msg.position.y = reference_point.position(1);
   msg.position.z = reference_point.position(2);
   if (_setpoint_type == SetpointTypes::POSITION_ONLY) {
+    // type_mask: ignore velocity (8+16+32), acceleration (64+128+256), yaw_rate (2048)
+    // This tells ArduPilot to only use position + yaw
+    msg.type_mask = 8 + 16 + 32 + 64 + 128 + 256 + 2048;  // = 2552
     msg.velocity.x = 0.0;
     msg.velocity.y = 0.0;
     msg.velocity.z = 0.0;
@@ -713,6 +735,8 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
     msg.acceleration_or_force.y = 0.0;
     msg.acceleration_or_force.z = 0.0;
   } else if (_setpoint_type == SetpointTypes::FULL_STATE) {
+    // Use all fields - position, velocity, acceleration, yaw
+    // msg.type_mask = 2048;  // Only ignore yaw_rate
     msg.velocity.x = reference_point.velocity(0);
     msg.velocity.y = reference_point.velocity(1);
     msg.velocity.z = reference_point.velocity(2);
@@ -720,7 +744,16 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
     msg.acceleration_or_force.y = reference_point.acceleration(1);
     msg.acceleration_or_force.z = reference_point.acceleration(2);
   }
+  // Yaw in ENU: atan2(North, East) gives 0° = East, 90° = North (CCW positive)
+  // This matches MAVROS ENU convention - no offset needed
   msg.yaw = reference_point.heading;
+  
+  // Debug: Log the actual setpoint being published
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //   "PUBLISHING to setpoint_raw/local: pos=(%.2f,%.2f,%.2f) yaw=%.1f deg | vel=(%.2f,%.2f,%.2f)",
+  //   msg.position.x, msg.position.y, msg.position.z, msg.yaw * 180.0 / M_PI,
+  //   msg.velocity.x, msg.velocity.y, msg.velocity.z);
+  
   raw_ref_pos_pub->publish(msg);
 }
 
@@ -790,6 +823,14 @@ void PlannerNode::get_reference_point_at_time(
   } catch (tf2::TransformException& ex) {
     RCLCPP_WARN(this->get_logger(), "Transform failure: %s", ex.what());
   }
+
+  // Debug: Log frame transformations
+  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+  //   "DEBUG TRAJ - cam:(%.2f,%.2f,%.2f) -> body:(%.2f,%.2f,%.2f) -> world:(%.2f,%.2f,%.2f) | b2w_t:(%.2f,%.2f,%.2f)",
+  //   position_in_camera_frame[0], position_in_camera_frame[1], position_in_camera_frame[2],
+  //   position_in_body_frame.x, position_in_body_frame.y, position_in_body_frame.z,
+  //   position_in_world_frame.x, position_in_world_frame.y, position_in_world_frame.z,
+  //   body_to_world.transform.translation.x, body_to_world.transform.translation.y, body_to_world.transform.translation.z);
 
   Eigen::Vector3d trajectory_vector =
     geometryToEigen(reference_trajectory.get_terminal_position_in_world_frame()) -
@@ -877,13 +918,23 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
 void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   if (_planner_state != PlanningStates::TRAJECTORY_CONTROL)
     return;
-  // Check if depth image is too old (> 50ms)
+  
+  // Two time references needed:
+  // 1. Wall clock - for real sensors (depth camera) that stamp with wall time
+  // 2. Node time (this->now()) - for ROS messages that use sim time when use_sim_time=true
+  auto wall_now = std::chrono::system_clock::now();
+  double wall_now_sec = std::chrono::duration<double>(wall_now.time_since_epoch()).count();
+  rclcpp::Time time_now = this->now();  // For state/transform checks (sim time domain)
+  
+  // Check if depth image is too old
+  // Use wall clock because real camera stamps with wall time, not sim time
   rclcpp::Time depth_time = rclcpp::Time(depth_msg->header.stamp);
-  rclcpp::Time time_now = this->now();
-  if ((time_now - depth_time).seconds() > 0.05) {
-    // RCLCPP_WARN(this->get_logger(),
-    //                      "Depth image too old (%.3f s), rejecting for planning",
-    //                      (time_now - depth_time).seconds());
+  double depth_age = wall_now_sec - depth_time.seconds();
+  
+  if (depth_age > _depth_age_threshold) {
+    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+    //                      "Depth image too old (%.3f s > %.3f s threshold), rejecting",
+    //                      depth_age, _depth_age_threshold);
     return;
   }
   
@@ -897,13 +948,13 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
-    // Check if state data is too old (> 50ms) before using for planning
+    // Check if state data is too old before using for planning
     state_timestamp = _state.t;
     double state_age = time_now.seconds() - state_timestamp;
-    if (state_age > 0.05) {
-      // RCLCPP_WARN(this->get_logger(),
-      //       "State data too old (%.3f s), rejecting for planning",
-      //       state_age);
+    if (state_age > _state_age_threshold) {
+      // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      //       "State data too old (%.3f s > %.3f s threshold), rejecting",
+      //       state_age, _state_age_threshold);
       return;
     }
     
@@ -919,15 +970,15 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       return;
     }
     
-    // Check if transforms are too old (> 50ms)
+    // Check if transforms are too old
     rclcpp::Time body_to_world_time = rclcpp::Time(body_to_world.header.stamp);
     rclcpp::Time world_to_body_time = rclcpp::Time(world_to_body.header.stamp);
-    if ((time_now - body_to_world_time).seconds() > 0.05 ||
-      (time_now - world_to_body_time).seconds() > 0.05) {
-      // RCLCPP_WARN(this->get_logger(),
-      //       "Transform too old (body_to_world: %.3f s, world_to_body: %.3f s), rejecting for planning",
-      //       (time_now - body_to_world_time).seconds(),
-      //       (time_now - world_to_body_time).seconds());
+    double b2w_age = (time_now - body_to_world_time).seconds();
+    double w2b_age = (time_now - world_to_body_time).seconds();
+    if (b2w_age > _transform_age_threshold || w2b_age > _transform_age_threshold) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "Transform too old (b2w: %.3f s, w2b: %.3f s > %.3f s threshold), rejecting",
+            b2w_age, w2b_age, _transform_age_threshold);
       return;
     }
     

@@ -37,7 +37,12 @@ depth_camera:
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.9
 acc_planning_threshold: 0.1
-vel_planning_threshold: 0.4          # New: Lateral and vertical velocity threshold (m/s)
+vel_planning_threshold: 0.4          # Lateral and vertical velocity threshold (m/s)
+
+# Data freshness thresholds (seconds) - reject stale data for planning safety
+depth_age_threshold: 0.12            # Max age of depth image (wall clock) before rejection
+state_age_threshold: 0.05           # Max age of state estimate (sim time) before rejection
+transform_age_threshold: 0.05        # Max age of TF transforms (sim time) before rejection
 sampled_trajectories_threshold: 8000
 checked_trajectories_threshold: 100
 3d_planning: no                     # Use 2D planning (safer for initial testing)
@@ -56,11 +61,11 @@ minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
 # Fence/world limits (keep drone within safe bounds)
 fence_limits:
   min_x: -2.0
-  max_x: 5.0
-  min_y: -2.0
-  max_y: 2.0
+  max_x: 2.0  # East is positive X in ENU
+  min_y: -2.0  
+  max_y: 5.0  # North is positive Y in ENU
   min_z: 0.4
-  max_z: 2.5
+  max_z: 2.5  # Up is positive Z in ENU
 
 # SSTO trajectory generation parameters
 # Sampling parameters
