@@ -17,6 +17,7 @@
 #pragma once
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
 // Eigen catkin
 #include <Eigen/Dense>
@@ -70,10 +71,16 @@ class Polynomial {
 
   double get_max() const {
     std::vector<double> vals = get_extremes_and_terminals();
+    if (vals.empty()) {
+      return std::numeric_limits<double>::max();  // Return max if no valid points
+    }
     return *std::max_element(vals.begin(), vals.end());
   }
   double get_min() const {
     std::vector<double> vals = get_extremes_and_terminals();
+    if (vals.empty()) {
+      return std::numeric_limits<double>::max();  // Return max to indicate no valid minimum found
+    }
     return *std::min_element(vals.begin(), vals.end());
   }
 

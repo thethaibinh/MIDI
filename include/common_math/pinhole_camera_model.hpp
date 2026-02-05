@@ -46,6 +46,10 @@ class PinholeCamera {
       _minimum_clear_distance(minimum_clear_distance) {}
 
   Eigen::Vector3d get_covariance_matrix(const Eigen::Vector3d& depth_point) const {
+    // Return default covariance if coefficients not properly initialized
+    if (_cov_coeffs.size() < 6) {
+      return Eigen::Vector3d(0.01, 0.01, 0.01);  // Default small covariance
+    }
     double ca0 = _cov_coeffs[0];
     double ca1 = _cov_coeffs[1];
     double ca2 = _cov_coeffs[2];
@@ -111,7 +115,9 @@ class PinholeCamera {
                                             std::vector<double>& out_x,
                                             std::vector<double>& out_y) const {
 
-    double safety_margin = _true_vehicle_radius * _focal_length / _minimum_clear_distance;
+    // Protect against division by zero - use minimum of 0.01m (1cm)
+    double safe_min_clear_dist = std::max(_minimum_clear_distance, 0.01);
+    double safety_margin = _true_vehicle_radius * _focal_length / safe_min_clear_dist;
     double z = point.z();
     constexpr double MIN_Z_MARGIN = 0.01;  // 1cm minimum
     if (std::abs(z) < MIN_Z_MARGIN) {
@@ -144,8 +150,14 @@ class PinholeCamera {
    * left, right, top, bottom
    */
   std::vector<uint16_t> get_frame_dimensions_with_true_radius_margin() const {
-    uint16_t margin = static_cast<uint16_t>(_true_vehicle_radius * _focal_length / _minimum_clear_distance);
-    return {margin, static_cast<uint16_t>(_width - margin), margin, static_cast<uint16_t>(_height - margin)};
+    // Protect against division by zero - use minimum of 0.01m (1cm)
+    double safe_min_clear_dist = std::max(_minimum_clear_distance, 0.01);
+    double margin_d = _true_vehicle_radius * _focal_length / safe_min_clear_dist;
+    // Clamp margin to valid range to prevent underflow when subtracting from width/height
+    uint16_t margin = static_cast<uint16_t>(std::clamp(margin_d, 0.0, static_cast<double>(std::min(_width, _height) / 2)));
+    uint16_t right = (_width > margin) ? static_cast<uint16_t>(_width - margin) : margin;
+    uint16_t bottom = (_height > margin) ? static_cast<uint16_t>(_height - margin) : margin;
+    return {margin, right, margin, bottom};
   }
 
   // std::vector<uint16_t> get_frame_dimensions_with_planning_radius_margin() const {

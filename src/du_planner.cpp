@@ -59,6 +59,10 @@ DuPlanner::DuPlanner(const cv::Mat& depthImage, const PinholeCamera& camera,
     max_collision_probability(0.0),
     collision_checking_method(collision_checking_method) {
   _depth_data = reinterpret_cast<const float*>(depthImage.data);
+  // Validate depth data pointer
+  if (_depth_data == nullptr) {
+    std::cerr << "MIDI Error: Null depth data pointer in DuPlanner constructor" << std::endl;
+  }
 }
 
 bool DuPlanner::find_lowest_cost_trajectory(
@@ -150,6 +154,11 @@ bool DuPlanner::find_lowest_cost_trajectory(
       }
       if (!is_collision_free) break;
     }
+    // Clean up allocated segments to prevent memory leak
+    for (auto* seg : segments) {
+      delete seg;
+    }
+    segments.clear();
 
     _checking_time += duration_cast<microseconds>(high_resolution_clock::now() - start_generating_time).count();
     // Increase as another trajectory has been checked
@@ -339,21 +348,24 @@ bool DuPlanner::is_segment2_collision_free(const SecondOrderSegment* original_se
   // Compute interest region for collision checking
   std::vector<int16_t> boundary = original_segment->get_projection_boundary(camera);
   if (boundary.size() != 4) return false;
-  const int16_t left = boundary[0];
-  const int16_t top = boundary[1];
-  const int16_t right = boundary[2];
-  const int16_t bottom = boundary[3];
+  
+  // Clamp boundary values to valid image coordinates to prevent overflow
+  // Use int for intermediate calculations to avoid signed/unsigned issues
+  const uint16_t img_width = camera.get_width();
+  const uint16_t img_height = camera.get_height();
+  const uint16_t left = static_cast<uint16_t>(std::clamp(static_cast<int>(boundary[0]), 0, static_cast<int>(img_width)));
+  const uint16_t top = static_cast<uint16_t>(std::clamp(static_cast<int>(boundary[1]), 0, static_cast<int>(img_height)));
+  const uint16_t right = static_cast<uint16_t>(std::clamp(static_cast<int>(boundary[2]), 0, static_cast<int>(img_width)));
+  const uint16_t bottom = static_cast<uint16_t>(std::clamp(static_cast<int>(boundary[3]), 0, static_cast<int>(img_height)));
 
-  if (left < 0 || right > camera.get_width() || top < 0 ||
-      bottom > camera.get_height()) {
-    // std::cerr << "MIDI Error: Boundary out of frame" << std::endl;
+  // Skip if boundary is invalid (e.g., left >= right or top >= bottom after clamping)
+  if (left >= right || top >= bottom) {
     return false;
   }
 
   // Check for collision and compute probability for all pixels in bb_ltrb
   const Eigen::Vector3d endpoint = original_segment->get_end_point();
   const double checking_depth = endpoint.z() + camera.get_planning_vehicle_radius();
-  const uint16_t img_width = camera.get_width();
   const double true_vehicle_radius = camera.get_true_vehicle_radius();
   const double minimum_clear_distance = camera.get_minimum_clear_distance();
   const double planning_vehicle_radius = camera.get_planning_vehicle_radius();

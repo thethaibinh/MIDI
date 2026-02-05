@@ -118,7 +118,11 @@ class RandomTrajectorySampler {
       else
         gen_pixel = camera.clamp_to_frame_with_margin(_pixelX(_gen), _pixelY(_gen));
       
-      // Bounds check before depth access
+      // Bounds check before depth access - ensure pixel is within valid image bounds
+      if (gen_pixel.x() < 0 || gen_pixel.x() >= camera.get_width() ||
+          gen_pixel.y() < 0 || gen_pixel.y() >= camera.get_height()) {
+        continue;  // Skip invalid pixel coordinates
+      }
       int pixel_index = gen_pixel.y() * camera.get_width() + gen_pixel.x();      
       // Get raw depth value
       double raw_depth = _depth_data[pixel_index];
