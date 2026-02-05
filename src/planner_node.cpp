@@ -931,9 +931,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   double depth_age = wall_now_sec - depth_time.seconds();
   
   if (depth_age > _depth_age_threshold) {
-    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-    //                      "Depth image too old (%.3f s > %.3f s threshold), rejecting",
-    //                      depth_age, _depth_age_threshold);
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "Depth image too old (%.3f s > %.3f s threshold), rejecting",
+                         depth_age, _depth_age_threshold);
     return;
   }
   
@@ -951,9 +951,9 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     state_timestamp = _state.t;
     double state_age = time_now.seconds() - state_timestamp;
     if (state_age > _state_age_threshold) {
-      // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      //       "State data too old (%.3f s > %.3f s threshold), rejecting",
-      //       state_age, _state_age_threshold);
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "State data too old (%.3f s > %.3f s threshold), rejecting",
+            state_age, _state_age_threshold);
       return;
     }
     
