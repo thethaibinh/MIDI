@@ -40,7 +40,7 @@ acc_planning_threshold: 0.1
 vel_planning_threshold: 0.4          # Lateral and vertical velocity threshold (m/s)
 
 # Data freshness thresholds (seconds) - reject stale data for planning safety
-depth_age_threshold: 0.12            # Max age of depth image (wall clock) before rejection
+depth_age_threshold: 0.08            # Max age of depth image (wall clock) before rejection
 state_age_threshold: 0.05           # Max age of state estimate (sim time) before rejection
 transform_age_threshold: 0.05        # Max age of TF transforms (sim time) before rejection
 sampled_trajectories_threshold: 8000
@@ -56,7 +56,7 @@ openmp_chunk_size: 16
 # Collision checking parameters (adjust based on your drone size)
 true_vehicle_radius: 0.33           # Actual radius including propellers (m)
 planning_vehicle_radius: 0.48       # Safety margin for planning (m)
-minimum_clear_distance: 0.8         # Min clearance from obstacles (m)
+minimum_clear_distance: 0.6         # Min clearance from obstacles (m)
 
 # Fence/world limits (keep drone within safe bounds)
 fence_limits:
