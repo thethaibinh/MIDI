@@ -496,6 +496,18 @@ void PlannerNode::update_planner_state() {
   // Trigger on either _goal_set (mission/fly_to) or takeoff_requested_ (takeoff-only)
   if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
       (_goal_set || takeoff_requested_)) {
+    
+    // Compute goal heading once from initial position to goal (only if goal is set)
+    if (_goal_set) {
+      double dx = _goal_in_world_frame.x - _state.pose.position.x;
+      double dy = _goal_in_world_frame.y - _state.pose.position.y;
+      _goal_heading = atan2(dy, dx);  // radians, ENU frame
+      RCLCPP_INFO_ONCE(this->get_logger(), "Goal heading computed: %.1f deg (%.2f rad)",
+                       _goal_heading * 180.0 / M_PI, _goal_heading);
+    } else {
+      _goal_heading = 0.0;  // Default heading for takeoff-only
+    }
+    
     // Step 1: Switch to GUIDED mode if not already
     if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -831,11 +843,13 @@ void PlannerNode::get_reference_point_at_time(
   //   position_in_world_frame.x, position_in_world_frame.y, position_in_world_frame.z,
   //   body_to_world.transform.translation.x, body_to_world.transform.translation.y, body_to_world.transform.translation.z);
 
-  Eigen::Vector3d trajectory_vector =
-    geometryToEigen(reference_trajectory.get_terminal_position_in_world_frame()) -
-    geometryToEigen(reference_trajectory.get_initial_position_in_world_frame());
-  double terminal_heading = atan2f(trajectory_vector[1], trajectory_vector[0]);
-  reference_point.heading = terminal_heading;
+  // Eigen::Vector3d trajectory_vector =
+  //   geometryToEigen(reference_trajectory.get_terminal_position_in_world_frame()) -
+  //   geometryToEigen(reference_trajectory.get_initial_position_in_world_frame());
+  // double terminal_heading = atan2f(trajectory_vector[1], trajectory_vector[0]);
+  // reference_point.heading = terminal_heading;
+  // Use the goal heading computed once when goal was set (direction from start to goal)
+  reference_point.heading = _goal_heading;  
   Eigen::Vector3d current_euler_angles = quaternionToEulerAnglesZYX(geometryToEigen(_state.pose.orientation));
 
   // Comment to turn off steering

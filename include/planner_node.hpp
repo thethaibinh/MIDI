@@ -225,6 +225,7 @@ class PlannerNode : public rclcpp::Node {
   double _go_to_goal_threshold, _goal_north_coordinate, _goal_west_coordinate, _goal_up_coordinate;
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
+  double _goal_heading;  // Heading to goal (computed once when goal is set)
   double _max_velocity_x, _max_velocity_y, _max_velocity_z;
   double _max_acceleration_x, _max_acceleration_y, _max_acceleration_z;
   double _acc_planning_threshold, _vel_planning_threshold;
