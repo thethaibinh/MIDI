@@ -60,10 +60,10 @@ minimum_clear_distance: 1.0         # Min clearance from obstacles (m)
 
 # Fence/world limits (keep drone within safe bounds)
 fence_limits:
-  min_x: -2.0
-  max_x: 2.0  # East is positive X in ENU
-  min_y: -2.0  
-  max_y: 5.0  # North is positive Y in ENU
+  min_x: -3.5
+  max_x: 3.5  # East is positive X in ENU
+  min_y: -1.0  
+  max_y: 7.5  # North is positive Y in ENU
   min_z: 0.4
   max_z: 2.5  # Up is positive Z in ENU
 

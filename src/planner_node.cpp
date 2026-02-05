@@ -337,14 +337,14 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
   // Convert based on runtime mode's internal coordinate convention
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones uses NWU internally, no conversion needed
-    _goal_in_world_frame.x = msg->x;  // North
-    _goal_in_world_frame.y = msg->y;  // West
+    _goal_in_world_frame.x = _state.pose.position.x + msg->x;  // North
+    _goal_in_world_frame.y = _state.pose.position.y + msg->y;  // West
     _goal_in_world_frame.z = msg->z;  // Up
   } else {
     // MAVROS uses ENU internally
     // NWU -> ENU: X_enu = -Y_nwu (East = -West), Y_enu = X_nwu (North), Z same
-    _goal_in_world_frame.x = -msg->y;  // East = -West
-    _goal_in_world_frame.y = msg->x;   // North
+    _goal_in_world_frame.x = _state.pose.position.x - msg->y;  // East = -West
+    _goal_in_world_frame.y = _state.pose.position.y + msg->x;   // North
     _goal_in_world_frame.z = msg->z;   // Up
   }
   
@@ -609,39 +609,38 @@ void PlannerNode::update_planner_state() {
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
     set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
-    _stop_planning_point_in_world_frame = reference_trajectory_.get_terminal_position_in_world_frame();
   }
   // Land when at goal (MAVROS only)
-  else if (_runtime_mode == RuntimeModes::MAVROS &&
-           _planner_state == PlanningStates::GO_TO_GOAL &&
-           distance_to_goal < _go_to_goal_threshold * 0.2 &&
-           !land_pending_) {
-    if (land_srv->service_is_ready()) {
-      auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
-      land_pending_ = true;
+  // else if (_runtime_mode == RuntimeModes::MAVROS &&
+  //          _planner_state == PlanningStates::GO_TO_GOAL &&
+  //          distance_to_goal < _go_to_goal_threshold * 0.2 &&
+  //          !land_pending_) {
+  //   if (land_srv->service_is_ready()) {
+  //     auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
+  //     land_pending_ = true;
       
-      land_srv->async_send_request(request,
-        [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
-          land_pending_ = false;
-          try {
-            auto response = future.get();
-            if (response->success) {
-              set_auto_pilot_state_forced(PlanningStates::LAND);
-              RCLCPP_WARN(this->get_logger(), "Land command accepted!");
-            } else {
-              RCLCPP_ERROR(this->get_logger(), "Land command rejected by FCU");
-            }
-          } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Land service failed: %s", e.what());
-          }
-        });
-    }
-  }
+  //     land_srv->async_send_request(request,
+  //       [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
+  //         land_pending_ = false;
+  //         try {
+  //           auto response = future.get();
+  //           if (response->success) {
+  //             set_auto_pilot_state_forced(PlanningStates::LAND);
+  //             RCLCPP_WARN(this->get_logger(), "Land command accepted!");
+  //           } else {
+  //             RCLCPP_ERROR(this->get_logger(), "Land command rejected by FCU");
+  //           }
+  //         } catch (const std::exception& e) {
+  //           RCLCPP_ERROR(this->get_logger(), "Land service failed: %s", e.what());
+  //         }
+  //       });
+  //   }
+  // }
   // Reset after landing complete
-  else if (_runtime_mode == RuntimeModes::MAVROS &&
-           _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
-    reset_callback(nullptr);
-  }
+  // else if (_runtime_mode == RuntimeModes::MAVROS &&
+  //          _planner_state == PlanningStates::LAND && !flight_controller_status.armed) {
+  //   reset_callback(nullptr);
+  // }
 }
 
 void PlannerNode::track_trajectory() {
