@@ -40,8 +40,8 @@ acc_planning_threshold: 0.1
 vel_planning_threshold: 0.4          # Lateral and vertical velocity threshold (m/s)
 
 # Data freshness thresholds (seconds) - reject stale data for planning safety
-depth_age_threshold: 0.08            # Max age of depth image (wall clock) before rejection
-state_age_threshold: 0.05           # Max age of state estimate (sim time) before rejection
+depth_age_threshold: 0.09            # Max age of depth image (wall clock) before rejection
+state_age_threshold: 0.06           # Max age of state estimate (sim time) before rejection
 transform_age_threshold: 0.05        # Max age of TF transforms (sim time) before rejection
 sampled_trajectories_threshold: 8000
 checked_trajectories_threshold: 100
@@ -62,8 +62,8 @@ minimum_clear_distance: 0.6         # Min clearance from obstacles (m)
 fence_limits:
   min_x: -3.5
   max_x: 3.5  # East is positive X in ENU
-  min_y: -1.0  
-  max_y: 7.5  # North is positive Y in ENU
+  min_y: -3.6  
+  max_y: 3.6  # North is positive Y in ENU
   min_z: 0.4
   max_z: 2.5  # Up is positive Z in ENU
 
@@ -87,4 +87,4 @@ max_acceleration_z: 2.0             # Vertical acceleration (m/s²)
 trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)
 go_to_goal_threshold: 0.3              # Distance to switch to goal mode (m)
 mavros_control_mode: "kinematic"       # "kinematic" or "attitude"
-setpoint_type: "position"            # "position" or "full" control mode, "full" includes velocity and acceleration feedforward
+setpoint_type: "full"            # "position" or "full" control mode, "full" includes velocity and acceleration feedforward
