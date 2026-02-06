@@ -302,6 +302,12 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
   // This ensures heading matches the goal direction we just computed
   _goal_heading = atan2(world_offset_y, world_offset_x);
   
+  // If _goal_up_coordinate wasn't set by a prior takeoff command, use the FBV goal altitude
+  // This ensures takeoff completion check works even without explicit takeoff command
+  if (_goal_up_coordinate <= 0.0) {
+    _goal_up_coordinate = msg->goal_z;
+  }
+  
   RCLCPP_INFO(this->get_logger(), "World offset: (%.2f, %.2f), heading: %.1f deg",
               world_offset_x, world_offset_y, _goal_heading * 180.0 / M_PI);
   RCLCPP_INFO(this->get_logger(), "Setting FBV goal to world (%.2f, %.2f, %.2f) - target: %s",
@@ -417,6 +423,12 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
   // Compute goal heading NOW using the offset (not later with potentially different state)
   _goal_heading = atan2(world_offset_y, world_offset_x);
   
+  // If _goal_up_coordinate wasn't set by a prior takeoff command, use the fly_to altitude
+  // This ensures takeoff completion check works even without explicit takeoff command
+  if (_goal_up_coordinate <= 0.0) {
+    _goal_up_coordinate = msg->z;
+  }
+  
   RCLCPP_INFO(this->get_logger(), "World offset: (%.2f, %.2f), heading: %.1f deg",
               world_offset_x, world_offset_y, _goal_heading * 180.0 / M_PI);
   RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame: (%.2f, %.2f, %.2f)",
@@ -460,6 +472,8 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _has_valid_setpoint = false;
   _last_valid_position = Eigen::Vector3d(0.0, 0.0, 0.0);
   _last_valid_heading = 0.0;
+  // Reset takeoff altitude
+  _goal_up_coordinate = 0.0;
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
@@ -685,8 +699,13 @@ void PlannerNode::update_planner_state() {
   //     "State check: current_z=%.2f, goal_z=%.2f, threshold=%.2f, state=%d",
   //     _state.pose.position.z, _goal_in_world_frame.z, _goal_in_world_frame.z - 0.1, (int)_planner_state);
 
-  // Transition from START to TRAJECTORY_CONTROL when altitude reached
-  if (_state.pose.position.z >= (_goal_in_world_frame.z - 0.1) && _planner_state == PlanningStates::TAKING_OFF) {
+  // Transition from TAKING_OFF to TRAJECTORY_CONTROL when takeoff altitude reached
+  // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
+  // This allows FBV/fly_to goals with different altitudes to work properly
+  double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
+  if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
+    RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), transitioning to TRAJECTORY_CONTROL",
+                _state.pose.position.z, takeoff_complete_altitude);
     set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
   }
   // Transition to GO_TO_GOAL when near goal
