@@ -251,18 +251,43 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
   }
   
   // FBV goal is in body frame (FLU: Forward-Left-Up)
-  // Convert to world frame by adding current position (like mission_callback)
-  // Note: This assumes yaw=0 alignment (NWU world = FLU body at start)
-  // For proper rotation, would need to apply yaw rotation
+  // We need to rotate by current yaw to convert to world frame
+  
+  // Get current yaw from quaternion
+  double qw = _state.pose.orientation.w;
+  double qx = _state.pose.orientation.x;
+  double qy = _state.pose.orientation.y;
+  double qz = _state.pose.orientation.z;
+  double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  
+  RCLCPP_INFO(this->get_logger(), "Current yaw: %.1f deg (%.2f rad)", yaw * 180.0 / M_PI, yaw);
+  
+  // Body FLU: X=Forward, Y=Left, Z=Up
+  double body_forward = msg->goal_x;
+  double body_left = msg->goal_y;
+  
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // OmniDrones: NWU world frame, goal_x=Forward=North, goal_y=Left=West
-    _goal_in_world_frame.x = _state.pose.position.x + msg->goal_x;
-    _goal_in_world_frame.y = _state.pose.position.y + msg->goal_y;
+    // OmniDrones: NWU world frame (X=North, Y=West, Z=Up)
+    // Rotate body FLU by yaw to get world NWU
+    // At yaw=0: body Forward=North, body Left=West
+    double world_north = body_forward * cos(yaw) - body_left * sin(yaw);
+    double world_west = body_forward * sin(yaw) + body_left * cos(yaw);
+    _goal_in_world_frame.x = _state.pose.position.x + world_north;
+    _goal_in_world_frame.y = _state.pose.position.y + world_west;
     _goal_in_world_frame.z = msg->goal_z;
   } else {
-    // MAVROS: ENU world frame
-    _goal_in_world_frame.x = _state.pose.position.x - msg->goal_y;  // East = -Left
-    _goal_in_world_frame.y = _state.pose.position.y + msg->goal_x;  // North = Forward
+    // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
+    // Rotate body FLU by yaw to get world ENU
+    // At yaw=0 (facing East): body Forward=East, body Left=North
+    // At yaw=90° (facing North): body Forward=North, body Left=West=-East
+    // World East = Forward*cos(yaw) - Left*sin(yaw)... wait, need to think about ENU yaw convention
+    // In ENU: yaw=0 means facing East, yaw increases CCW (toward North)
+    // Body FLU at yaw=0: Forward=East, Left=North
+    // Body FLU at yaw=90°: Forward=North, Left=West=-East
+    double world_east = body_forward * cos(yaw) - body_left * sin(yaw);
+    double world_north = body_forward * sin(yaw) + body_left * cos(yaw);
+    _goal_in_world_frame.x = _state.pose.position.x + world_east;
+    _goal_in_world_frame.y = _state.pose.position.y + world_north;
     _goal_in_world_frame.z = msg->goal_z;
   }
   
@@ -323,7 +348,7 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
 }
 
 void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg) {
-  RCLCPP_INFO(this->get_logger(), "Received fly_to command: (%.2f, %.2f, %.2f) NWU", 
+  RCLCPP_INFO(this->get_logger(), "Received fly_to command (body FLU): Forward=%.2f, Left=%.2f, Up=%.2f", 
               msg->x, msg->y, msg->z);
   RCLCPP_INFO(this->get_logger(), "Current position (from _state): (%.2f, %.2f, %.2f)",
               _state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
@@ -333,22 +358,41 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
     return;
   }
   
-  // FlyTo coordinates are in NWU world frame (absolute position)
-  // Convert based on runtime mode's internal coordinate convention
+  // FlyTo coordinates are in body frame (FLU: Forward-Left-Up)
+  // We need to rotate by current yaw to convert to world frame
+  
+  // Get current yaw from quaternion
+  double qw = _state.pose.orientation.w;
+  double qx = _state.pose.orientation.x;
+  double qy = _state.pose.orientation.y;
+  double qz = _state.pose.orientation.z;
+  double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  
+  RCLCPP_INFO(this->get_logger(), "Current yaw: %.1f deg (%.2f rad)", yaw * 180.0 / M_PI, yaw);
+  
+  // Body FLU: X=Forward, Y=Left, Z=Up
+  double body_forward = msg->x;
+  double body_left = msg->y;
+  
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // OmniDrones uses NWU internally, no conversion needed
-    _goal_in_world_frame.x = _state.pose.position.x + msg->x;  // North
-    _goal_in_world_frame.y = _state.pose.position.y + msg->y;  // West
-    _goal_in_world_frame.z = msg->z;  // Up
+    // OmniDrones: NWU world frame (X=North, Y=West, Z=Up)
+    // Rotate body FLU by yaw to get world NWU
+    double world_north = body_forward * cos(yaw) - body_left * sin(yaw);
+    double world_west = body_forward * sin(yaw) + body_left * cos(yaw);
+    _goal_in_world_frame.x = _state.pose.position.x + world_north;
+    _goal_in_world_frame.y = _state.pose.position.y + world_west;
+    _goal_in_world_frame.z = msg->z;
   } else {
-    // MAVROS uses ENU internally
-    // NWU -> ENU: X_enu = -Y_nwu (East = -West), Y_enu = X_nwu (North), Z same
-    _goal_in_world_frame.x = _state.pose.position.x - msg->y;  // East = -West
-    _goal_in_world_frame.y = _state.pose.position.y + msg->x;   // North
-    _goal_in_world_frame.z = msg->z;   // Up
+    // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
+    // Rotate body FLU by yaw to get world ENU
+    double world_east = body_forward * cos(yaw) - body_left * sin(yaw);
+    double world_north = body_forward * sin(yaw) + body_left * cos(yaw);
+    _goal_in_world_frame.x = _state.pose.position.x + world_east;
+    _goal_in_world_frame.y = _state.pose.position.y + world_north;
+    _goal_in_world_frame.z = msg->z;
   }
   
-  RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame (NWU for OmniDrones, ENU for MAVROS): (%.2f, %.2f, %.2f)",
+  RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame: (%.2f, %.2f, %.2f)",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
   _goal_set = true;
   mission_received_ = true;
