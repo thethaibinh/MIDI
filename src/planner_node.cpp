@@ -385,6 +385,10 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   trajectory_queue_.clear();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
+  // Reset fence breach recovery state
+  _has_valid_setpoint = false;
+  _last_valid_position = Eigen::Vector3d(0.0, 0.0, 0.0);
+  _last_valid_heading = 0.0;
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
@@ -718,46 +722,73 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   const double y = reference_point.position(1);
   const double z = reference_point.position(2);
   
-  if (x < _fence_min_x || x > _fence_max_x ||
-      y < _fence_min_y || y > _fence_max_y ||
-      z < _fence_min_z || z > _fence_max_z) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      "Setpoint (%.2f, %.2f, %.2f) ENU outside fence limits, not publishing", x, y, z);
-    return;
-  }
-  
   mavros_msgs::msg::PositionTarget msg;
   msg.header.stamp = this->now();
   msg.coordinate_frame = 1;  // FRAME_LOCAL_NED (but MAVROS actually accepts ENU here - legacy behavior)
   msg.type_mask = 0;
   
-  // MAVROS setpoint_raw/local accepts ENU directly despite coordinate_frame=NED (legacy quirk)
-  msg.position.x = reference_point.position(0);
-  msg.position.y = reference_point.position(1);
-  msg.position.z = reference_point.position(2);
-  if (_setpoint_type == SetpointTypes::POSITION_ONLY) {
-    // type_mask: ignore velocity (8+16+32), acceleration (64+128+256), yaw_rate (2048)
-    // This tells ArduPilot to only use position + yaw
-    msg.type_mask = 8 + 16 + 32 + 64 + 128 + 256 + 2048;  // = 2552
+  bool outside_fence = (x < _fence_min_x || x > _fence_max_x ||
+                        y < _fence_min_y || y > _fence_max_y ||
+                        z < _fence_min_z || z > _fence_max_z);
+  
+  if (outside_fence) {
+    // Fence breach: publish last valid position with zero velocity/acceleration to stop the drone
+    if (!_has_valid_setpoint) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "Setpoint (%.2f, %.2f, %.2f) ENU outside fence limits, no valid setpoint to fallback to", x, y, z);
+      return;
+    }
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "Setpoint (%.2f, %.2f, %.2f) ENU outside fence limits, stopping at last valid pos (%.2f, %.2f, %.2f)",
+      x, y, z, _last_valid_position(0), _last_valid_position(1), _last_valid_position(2));
+    
+    // Use last valid position with zero velocity/acceleration (position-only mode to stop)
+    msg.position.x = _last_valid_position(0);
+    msg.position.y = _last_valid_position(1);
+    msg.position.z = _last_valid_position(2);
     msg.velocity.x = 0.0;
     msg.velocity.y = 0.0;
     msg.velocity.z = 0.0;
     msg.acceleration_or_force.x = 0.0;
     msg.acceleration_or_force.y = 0.0;
     msg.acceleration_or_force.z = 0.0;
-  } else if (_setpoint_type == SetpointTypes::FULL_STATE) {
-    // Use all fields - position, velocity, acceleration, yaw
-    // msg.type_mask = 2048;  // Only ignore yaw_rate
-    msg.velocity.x = reference_point.velocity(0);
-    msg.velocity.y = reference_point.velocity(1);
-    msg.velocity.z = reference_point.velocity(2);
-    msg.acceleration_or_force.x = reference_point.acceleration(0);
-    msg.acceleration_or_force.y = reference_point.acceleration(1);
-    msg.acceleration_or_force.z = reference_point.acceleration(2);
+    msg.yaw = _last_valid_heading;
+    // Force position-only type_mask to ensure drone stops
+    msg.type_mask = 8 + 16 + 32 + 64 + 128 + 256 + 2048;  // = 2552 (ignore vel, accel, yaw_rate)
+  } else {
+    // Valid setpoint: store it and publish normally
+    _last_valid_position = reference_point.position;
+    _last_valid_heading = reference_point.heading;
+    _has_valid_setpoint = true;
+    
+    // MAVROS setpoint_raw/local accepts ENU directly despite coordinate_frame=NED (legacy quirk)
+    msg.position.x = reference_point.position(0);
+    msg.position.y = reference_point.position(1);
+    msg.position.z = reference_point.position(2);
+    if (_setpoint_type == SetpointTypes::POSITION_ONLY) {
+      // type_mask: ignore velocity (8+16+32), acceleration (64+128+256), yaw_rate (2048)
+      // This tells ArduPilot to only use position + yaw
+      msg.type_mask = 8 + 16 + 32 + 64 + 128 + 256 + 2048;  // = 2552
+      msg.velocity.x = 0.0;
+      msg.velocity.y = 0.0;
+      msg.velocity.z = 0.0;
+      msg.acceleration_or_force.x = 0.0;
+      msg.acceleration_or_force.y = 0.0;
+      msg.acceleration_or_force.z = 0.0;
+    } else if (_setpoint_type == SetpointTypes::FULL_STATE) {
+      // Use all fields - position, velocity, acceleration, yaw
+      // msg.type_mask = 2048;  // Only ignore yaw_rate
+      msg.velocity.x = reference_point.velocity(0);
+      msg.velocity.y = reference_point.velocity(1);
+      msg.velocity.z = reference_point.velocity(2);
+      msg.acceleration_or_force.x = reference_point.acceleration(0);
+      msg.acceleration_or_force.y = reference_point.acceleration(1);
+      msg.acceleration_or_force.z = reference_point.acceleration(2);
+    }
+    // Yaw in ENU: atan2(North, East) gives 0° = East, 90° = North (CCW positive)
+    // This matches MAVROS ENU convention - no offset needed
+    msg.yaw = reference_point.heading;
   }
-  // Yaw in ENU: atan2(North, East) gives 0° = East, 90° = North (CCW positive)
-  // This matches MAVROS ENU convention - no offset needed
-  msg.yaw = reference_point.heading;
   
   // Debug: Log the actual setpoint being published
   // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,

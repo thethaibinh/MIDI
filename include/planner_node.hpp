@@ -245,6 +245,11 @@ class PlannerNode : public rclcpp::Node {
   double _fence_min_y, _fence_max_y;
   double _fence_min_z, _fence_max_z;
   
+  // Last valid setpoint (for fence breach recovery - stop at last valid position)
+  Eigen::Vector3d _last_valid_position{0.0, 0.0, 0.0};
+  double _last_valid_heading{0.0};
+  bool _has_valid_setpoint{false};
+  
   // Benchmark tracking
   int32_t _current_trial_id = 0;
   rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
