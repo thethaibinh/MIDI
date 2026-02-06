@@ -260,11 +260,17 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
   double qz = _state.pose.orientation.z;
   double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
   
-  RCLCPP_INFO(this->get_logger(), "Current yaw: %.1f deg (%.2f rad)", yaw * 180.0 / M_PI, yaw);
+  // Store current position for goal computation (use same state for both goal and heading)
+  double current_x = _state.pose.position.x;
+  double current_y = _state.pose.position.y;
+  
+  RCLCPP_INFO(this->get_logger(), "Current pos: (%.2f, %.2f, %.2f), yaw: %.1f deg (%.2f rad)",
+              current_x, current_y, _state.pose.position.z, yaw * 180.0 / M_PI, yaw);
   
   // Body FLU: X=Forward, Y=Left, Z=Up
   double body_forward = msg->goal_x;
   double body_left = msg->goal_y;
+  double world_offset_x, world_offset_y;  // Offset in world frame
   
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones: NWU world frame (X=North, Y=West, Z=Up)
@@ -272,25 +278,32 @@ void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::Shar
     // At yaw=0: body Forward=North, body Left=West
     double world_north = body_forward * cos(yaw) - body_left * sin(yaw);
     double world_west = body_forward * sin(yaw) + body_left * cos(yaw);
-    _goal_in_world_frame.x = _state.pose.position.x + world_north;
-    _goal_in_world_frame.y = _state.pose.position.y + world_west;
+    world_offset_x = world_north;
+    world_offset_y = world_west;
+    _goal_in_world_frame.x = current_x + world_north;
+    _goal_in_world_frame.y = current_y + world_west;
     _goal_in_world_frame.z = msg->goal_z;
   } else {
     // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
     // Rotate body FLU by yaw to get world ENU
-    // At yaw=0 (facing East): body Forward=East, body Left=North
-    // At yaw=90° (facing North): body Forward=North, body Left=West=-East
-    // World East = Forward*cos(yaw) - Left*sin(yaw)... wait, need to think about ENU yaw convention
     // In ENU: yaw=0 means facing East, yaw increases CCW (toward North)
     // Body FLU at yaw=0: Forward=East, Left=North
     // Body FLU at yaw=90°: Forward=North, Left=West=-East
     double world_east = body_forward * cos(yaw) - body_left * sin(yaw);
     double world_north = body_forward * sin(yaw) + body_left * cos(yaw);
-    _goal_in_world_frame.x = _state.pose.position.x + world_east;
-    _goal_in_world_frame.y = _state.pose.position.y + world_north;
+    world_offset_x = world_east;
+    world_offset_y = world_north;
+    _goal_in_world_frame.x = current_x + world_east;
+    _goal_in_world_frame.y = current_y + world_north;
     _goal_in_world_frame.z = msg->goal_z;
   }
   
+  // Compute goal heading NOW using the offset (not later with potentially different state)
+  // This ensures heading matches the goal direction we just computed
+  _goal_heading = atan2(world_offset_y, world_offset_x);
+  
+  RCLCPP_INFO(this->get_logger(), "World offset: (%.2f, %.2f), heading: %.1f deg",
+              world_offset_x, world_offset_y, _goal_heading * 180.0 / M_PI);
   RCLCPP_INFO(this->get_logger(), "Setting FBV goal to world (%.2f, %.2f, %.2f) - target: %s",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
               msg->target_label.c_str());
@@ -368,30 +381,44 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
   double qz = _state.pose.orientation.z;
   double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
   
+  // Store current position for goal computation
+  double current_x = _state.pose.position.x;
+  double current_y = _state.pose.position.y;
+  
   RCLCPP_INFO(this->get_logger(), "Current yaw: %.1f deg (%.2f rad)", yaw * 180.0 / M_PI, yaw);
   
   // Body FLU: X=Forward, Y=Left, Z=Up
   double body_forward = msg->x;
   double body_left = msg->y;
+  double world_offset_x, world_offset_y;  // Offset in world frame
   
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones: NWU world frame (X=North, Y=West, Z=Up)
     // Rotate body FLU by yaw to get world NWU
     double world_north = body_forward * cos(yaw) - body_left * sin(yaw);
     double world_west = body_forward * sin(yaw) + body_left * cos(yaw);
-    _goal_in_world_frame.x = _state.pose.position.x + world_north;
-    _goal_in_world_frame.y = _state.pose.position.y + world_west;
+    world_offset_x = world_north;
+    world_offset_y = world_west;
+    _goal_in_world_frame.x = current_x + world_north;
+    _goal_in_world_frame.y = current_y + world_west;
     _goal_in_world_frame.z = msg->z;
   } else {
     // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
     // Rotate body FLU by yaw to get world ENU
     double world_east = body_forward * cos(yaw) - body_left * sin(yaw);
     double world_north = body_forward * sin(yaw) + body_left * cos(yaw);
-    _goal_in_world_frame.x = _state.pose.position.x + world_east;
-    _goal_in_world_frame.y = _state.pose.position.y + world_north;
+    world_offset_x = world_east;
+    world_offset_y = world_north;
+    _goal_in_world_frame.x = current_x + world_east;
+    _goal_in_world_frame.y = current_y + world_north;
     _goal_in_world_frame.z = msg->z;
   }
   
+  // Compute goal heading NOW using the offset (not later with potentially different state)
+  _goal_heading = atan2(world_offset_y, world_offset_x);
+  
+  RCLCPP_INFO(this->get_logger(), "World offset: (%.2f, %.2f), heading: %.1f deg",
+              world_offset_x, world_offset_y, _goal_heading * 180.0 / M_PI);
   RCLCPP_INFO(this->get_logger(), "Setting fly_to goal to world frame: (%.2f, %.2f, %.2f)",
               _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
   _goal_set = true;
@@ -545,16 +572,15 @@ void PlannerNode::update_planner_state() {
   if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
       (_goal_set || takeoff_requested_)) {
     
-    // Compute goal heading once from initial position to goal (only if goal is set)
-    if (_goal_set) {
-      double dx = _goal_in_world_frame.x - _state.pose.position.x;
-      double dy = _goal_in_world_frame.y - _state.pose.position.y;
-      _goal_heading = atan2(dy, dx);  // radians, ENU frame
-      RCLCPP_INFO_ONCE(this->get_logger(), "Goal heading computed: %.1f deg (%.2f rad)",
-                       _goal_heading * 180.0 / M_PI, _goal_heading);
-    } else {
+    // Note: _goal_heading is now computed in the goal callbacks (fbv_goal_callback, fly_to_callback)
+    // at the same time as goal position, using the same state snapshot.
+    // For takeoff-only (no goal), use default heading of 0.
+    if (!_goal_set) {
       _goal_heading = 0.0;  // Default heading for takeoff-only
     }
+    // Log the heading that will be used
+    RCLCPP_INFO_ONCE(this->get_logger(), "Using goal heading: %.1f deg (%.2f rad)",
+                     _goal_heading * 180.0 / M_PI, _goal_heading);
     
     // Step 1: Switch to GUIDED mode if not already
     if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
