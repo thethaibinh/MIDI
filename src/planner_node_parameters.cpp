@@ -193,6 +193,26 @@ bool PlannerNode::loadParameters() {
   else if (setpoint_type_str == "full")
     _setpoint_type = SetpointTypes::FULL_STATE;
 
+  // Swarm exploration defaults (overridden at runtime via /swarm_params topic)
+  if (planner_config["swarm"]) {
+    auto sw = planner_config["swarm"];
+    _num_drones = sw["num_drones"].as<int>(3);
+    _w_cohesion = sw["w_cohesion"].as<double>(0.8);
+    _w_separation = sw["w_separation"].as<double>(1.5);
+    _w_alignment = sw["w_alignment"].as<double>(0.5);
+    _w_frontier = sw["w_frontier"].as<double>(1.2);
+    _w_obstacle = sw["w_obstacle"].as<double>(2.0);
+    _separation_radius = sw["separation_radius"].as<double>(3.0);
+    _neighbor_radius = sw["neighbor_radius"].as<double>(10.0);
+    _max_swarm_speed = sw["max_swarm_speed"].as<double>(1.5);
+    _swarm_altitude = sw["altitude"].as<double>(1.5);
+    _grid_cell_size = sw["cell_size"].as<double>(0.5);
+    _grid_width = sw["map_width"].as<double>(60.0);
+    _grid_height = sw["map_height"].as<double>(60.0);
+    RCLCPP_INFO(this->get_logger(), "Swarm config loaded: %d drones, coh=%.2f sep=%.2f ali=%.2f fro=%.2f",
+                _num_drones, _w_cohesion, _w_separation, _w_alignment, _w_frontier);
+  }
+
   RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
   return true;
 }

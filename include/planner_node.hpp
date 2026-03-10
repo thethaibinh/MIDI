@@ -10,6 +10,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <opencv2/opencv.hpp>
 #include <random>
 #include <string>
@@ -57,6 +58,9 @@
 #include <ground_system_msgs/msg/benchmark_status.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
 #include <ground_system_msgs/msg/fly_to.hpp>
+#include <ground_system_msgs/msg/swarm_params.hpp>
+#include <ground_system_msgs/msg/swarm_exploration_status.hpp>
+#include <ground_system_msgs/msg/occupancy_grid2_d.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -212,6 +216,23 @@ class PlannerNode : public rclcpp::Node {
   // Benchmark helpers
   void publish_benchmark_status(uint8_t status);
 
+  // ===== Frontier-Led Swarming =====
+  void swarm_params_callback(const ground_system_msgs::msg::SwarmParams::SharedPtr msg);
+  void neighbor_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg, int neighbor_id);
+  void swarm_exploration_loop();
+  void update_occupancy_grid();
+  std::vector<Eigen::Vector2d> detect_frontiers();
+  Eigen::Vector2d select_frontier(const std::vector<Eigen::Vector2d>& frontiers);
+  Eigen::Vector3d compute_cohesion();
+  Eigen::Vector3d compute_separation();
+  Eigen::Vector3d compute_alignment();
+  Eigen::Vector3d compute_frontier_attraction(const Eigen::Vector2d& target_frontier);
+  void publish_swarm_status();
+  void publish_occupancy_grid();
+  Eigen::Vector2d world_to_grid(double wx, double wy) const;
+  Eigen::Vector2d grid_to_world(int gx, int gy) const;
+  bool is_in_grid(int gx, int gy) const;
+
   // Constants
   static constexpr double kPositionJumpTolerance_ = 0.5;
   RuntimeModes _runtime_mode;
@@ -258,6 +279,59 @@ class PlannerNode : public rclcpp::Node {
   // Odom throttle for zenoh (100Hz -> 10Hz)
   rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
   static constexpr double kOdomThrottleInterval_ = 0.1;  // 10 Hz
+
+  // ===== Frontier-Led Swarming Members =====
+  bool _swarm_mode{false};
+  int _drone_id{1};
+  int _num_drones{3};
+
+  // Swarm behavior weights (runtime-tunable via /swarm_params)
+  double _w_cohesion{0.8};
+  double _w_separation{1.5};
+  double _w_alignment{0.5};
+  double _w_frontier{1.2};
+  double _w_obstacle{2.0};
+  double _separation_radius{3.0};
+  double _neighbor_radius{10.0};
+  double _max_swarm_speed{1.5};
+  double _swarm_altitude{1.5};
+
+  // Occupancy grid
+  double _grid_cell_size{0.5};
+  double _grid_width{60.0};
+  double _grid_height{60.0};
+  int _grid_cols{0};
+  int _grid_rows{0};
+  double _grid_origin_x{0.0};
+  double _grid_origin_y{0.0};
+  std::vector<uint8_t> _occupancy_grid;  // 0=unknown, 1=free, 2=occupied
+  std::mutex _grid_mutex;
+  uint32_t _cells_explored{0};
+
+  // Neighbor state tracking
+  struct NeighborState {
+    Eigen::Vector3d position{0, 0, 0};
+    Eigen::Vector3d velocity{0, 0, 0};
+    double yaw{0.0};
+    rclcpp::Time last_update{0, 0, RCL_ROS_TIME};
+    bool valid{false};
+  };
+  std::map<int, NeighborState> _neighbor_states;
+  std::mutex _neighbor_mutex;
+
+  // Frontier tracking
+  Eigen::Vector2d _assigned_frontier{0, 0};
+  bool _has_frontier{false};
+  uint32_t _frontiers_remaining{0};
+
+  // Swarm pub/sub
+  rclcpp::Subscription<ground_system_msgs::msg::SwarmParams>::SharedPtr swarm_params_sub;
+  std::vector<rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr> neighbor_odom_subs;
+  rclcpp::Publisher<ground_system_msgs::msg::SwarmExplorationStatus>::SharedPtr swarm_status_pub;
+  rclcpp::Publisher<ground_system_msgs::msg::OccupancyGrid2D>::SharedPtr occupancy_grid_pub;
+  rclcpp::TimerBase::SharedPtr swarm_exploration_timer_;
+  rclcpp::TimerBase::SharedPtr swarm_status_timer_;
+  rclcpp::TimerBase::SharedPtr occupancy_pub_timer_;
 };
 
 #endif  // PLANNER_NODE_HPP

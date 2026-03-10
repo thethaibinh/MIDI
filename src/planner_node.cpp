@@ -36,11 +36,16 @@ PlannerNode::PlannerNode()
   // Publishers based on runtime mode
   if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
     // Position/velocity/acceleration setpoints (PositionTarget)
-    // Use absolute path since MAVROS is at root namespace, not Drone1 namespace
-    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", 10);
+    if (_runtime_mode == RuntimeModes::MAVROS) {
+      // MAVROS: absolute path since MAVROS node is at root namespace
+      raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", 10);
+    } else {
+      // OmniDrones: relative path so namespace is applied (e.g. /Drone1/mavros/setpoint_raw/local)
+      raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("mavros/setpoint_raw/local", 10);
+    }
   }
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // Velocity-only setpoints (TwistStamped) - alternative control mode
+    // Velocity-only setpoints (TwistStamped) - relative path for namespace
     vel_cmd_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>("mavros/setpoint_velocity/cmd_vel", 10);
   }
   if (_runtime_mode == RuntimeModes::MAVROS) {
@@ -50,9 +55,9 @@ PlannerNode::PlannerNode()
   }
 
   // Subscribers
-  image_sub = this->create_subscription<sm::Image>(
-    _depth_topic, 10,
-    std::bind(&PlannerNode::img_callback, this, std::placeholders::_1));
+  // image_sub = this->create_subscription<sm::Image>(
+  //   _depth_topic, 10,
+  //   std::bind(&PlannerNode::img_callback, this, std::placeholders::_1));
 
   if (_visualise) {
     visual_sub = this->create_subscription<sm::Image>(
@@ -136,6 +141,44 @@ PlannerNode::PlannerNode()
     std::chrono::duration<double>(_trajectory_discretisation_cycle),
     std::bind(&PlannerNode::control_loop, this));
 
+  // ===== Frontier-Led Swarming Setup =====
+  // Derive drone_id from ROS namespace (e.g. /Drone1 -> 1)
+  std::string ns = this->get_namespace();
+  try {
+    // Extract trailing digits from namespace like "/Drone1"
+    std::string digits;
+    for (auto it = ns.rbegin(); it != ns.rend() && std::isdigit(*it); ++it)
+      digits.insert(digits.begin(), *it);
+    if (!digits.empty()) _drone_id = std::stoi(digits);
+  } catch (...) { _drone_id = 1; }
+  RCLCPP_INFO(this->get_logger(), "Drone ID: %d (namespace: %s)", _drone_id, ns.c_str());
+
+  // Swarm params subscriber (from ground GUI, runtime-tunable)
+  swarm_params_sub = this->create_subscription<ground_system_msgs::msg::SwarmParams>(
+    "/swarm_params", 10,
+    std::bind(&PlannerNode::swarm_params_callback, this, std::placeholders::_1));
+
+  // Subscribe to neighbor odometry topics
+  for (int i = 1; i <= _num_drones; ++i) {
+    if (i == _drone_id) continue;  // Skip self
+    std::string topic = "/Drone" + std::to_string(i) + "/odometry";
+    auto sub = this->create_subscription<nav_msgs::msg::Odometry>(
+      topic, 5,
+      [this, i](const nav_msgs::msg::Odometry::SharedPtr msg) {
+        this->neighbor_odom_callback(msg, i);
+      });
+    neighbor_odom_subs.push_back(sub);
+    RCLCPP_INFO(this->get_logger(), "Subscribed to neighbor: %s", topic.c_str());
+  }
+
+  // Swarm status publisher (for ground GUI)
+  swarm_status_pub = this->create_publisher<ground_system_msgs::msg::SwarmExplorationStatus>(
+    "/swarm_exploration_status", 10);
+
+  // Occupancy grid publisher (for ground GUI)
+  occupancy_grid_pub = this->create_publisher<ground_system_msgs::msg::OccupancyGrid2D>(
+    "/occupancy_grid", 5);
+
   RCLCPP_INFO(this->get_logger(), "MIDI Planner initialized");
 }
 
@@ -192,6 +235,64 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
   
   if (mission_received_) {
     RCLCPP_WARN(this->get_logger(), "Mission already received, ignoring duplicate");
+    return;
+  }
+
+  // ===== Frontier-Led Swarm Exploration =====
+  if (msg->mission_name == "swarm_explore") {
+    RCLCPP_WARN(this->get_logger(), "[SWARM] Starting frontier-led exploration (drone %d of %d)",
+                _drone_id, _num_drones);
+    _swarm_mode = true;
+    mission_received_ = true;
+
+    // Initialize occupancy grid
+    _grid_cols = static_cast<int>(_grid_width / _grid_cell_size);
+    _grid_rows = static_cast<int>(_grid_height / _grid_cell_size);
+    // Center grid on current position
+    _grid_origin_x = _state.pose.position.x - _grid_width / 2.0;
+    _grid_origin_y = _state.pose.position.y - _grid_height / 2.0;
+    {
+      const std::lock_guard<std::mutex> lock(_grid_mutex);
+      _occupancy_grid.assign(_grid_cols * _grid_rows, 0);  // All unknown
+      _cells_explored = 0;
+    }
+
+    _home_in_world_frame = _state.pose.position;
+
+    // Set initial altitude goal for takeoff
+    _goal_up_coordinate = _swarm_altitude;
+    _goal_in_world_frame.x = _state.pose.position.x;
+    _goal_in_world_frame.y = _state.pose.position.y;
+    _goal_in_world_frame.z = _swarm_altitude;
+    _goal_heading = 0.0;
+    _goal_set = true;
+
+    if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+      set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+      steering_value = 0.0f;
+      _steered = false;
+      trajectory_queue_.clear();
+      reference_trajectory_ = ruckig::Trajectory<3>();
+      had_reference_trajectory = false;
+    } else if (_runtime_mode == RuntimeModes::MAVROS) {
+      RCLCPP_WARN(this->get_logger(), "[MAVROS/SWARM] Mission received, initiating flight sequence...");
+    }
+
+    // Start swarm exploration timer (10 Hz) - will begin after takeoff
+    swarm_exploration_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(100),
+      std::bind(&PlannerNode::swarm_exploration_loop, this));
+
+    // Status publisher timer (2 Hz)
+    swarm_status_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(500),
+      std::bind(&PlannerNode::publish_swarm_status, this));
+
+    // Occupancy grid publisher timer (1 Hz)
+    occupancy_pub_timer_ = this->create_wall_timer(
+      std::chrono::seconds(1),
+      std::bind(&PlannerNode::publish_occupancy_grid, this));
+
     return;
   }
   
@@ -474,6 +575,18 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _last_valid_heading = 0.0;
   // Reset takeoff altitude
   _goal_up_coordinate = 0.0;
+  // Reset swarm state
+  _swarm_mode = false;
+  _has_frontier = false;
+  _frontiers_remaining = 0;
+  if (swarm_exploration_timer_) { swarm_exploration_timer_->cancel(); swarm_exploration_timer_.reset(); }
+  if (swarm_status_timer_) { swarm_status_timer_->cancel(); swarm_status_timer_.reset(); }
+  if (occupancy_pub_timer_) { occupancy_pub_timer_->cancel(); occupancy_pub_timer_.reset(); }
+  {
+    const std::lock_guard<std::mutex> lock(_grid_mutex);
+    _occupancy_grid.clear();
+    _cells_explored = 0;
+  }
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
@@ -690,6 +803,18 @@ void PlannerNode::update_planner_state() {
 
   if (!_goal_set) return;
 
+  // In swarm mode, state transitions are simple: just takeoff then stay in TRAJECTORY_CONTROL
+  // No fixed goal to approach, so skip distance-based transitions
+  if (_swarm_mode) {
+    double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
+    if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
+      RCLCPP_INFO(this->get_logger(), "[SWARM] Takeoff complete at z=%.2f, transitioning to TRAJECTORY_CONTROL",
+                  _state.pose.position.z);
+      set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+    }
+    return;  // Swarm loop handles everything else
+  }
+
   geometry_msgs::msg::Point goal_in_world_frame = _goal_in_world_frame;
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
@@ -753,6 +878,11 @@ void PlannerNode::track_trajectory() {
   if (_planner_state == PlanningStates::LAND ||
       _planner_state == PlanningStates::OFF ||
       !_goal_set)
+    return;
+
+  // In swarm mode, the swarm_exploration_loop() directly publishes setpoints
+  // via public_ref_pos(). Don't also publish from the depth trajectory pipeline.
+  if (_swarm_mode && _planner_state != PlanningStates::TAKING_OFF)
     return;
   
   // For TRAJECTORY_CONTROL state, we need a reference trajectory
@@ -1549,4 +1679,470 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
       polynomial_trajectory.points.clear();
     }
     visual_pub->publish(polynomial_trajectory);
+}
+
+// =============================================================================
+// Frontier-Led Swarming Implementation
+// =============================================================================
+
+void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmParams::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "[SWARM] Received updated params: coh=%.2f sep=%.2f ali=%.2f fro=%.2f obs=%.2f",
+              msg->w_cohesion, msg->w_separation, msg->w_alignment, msg->w_frontier, msg->w_obstacle);
+  _w_cohesion = msg->w_cohesion;
+  _w_separation = msg->w_separation;
+  _w_alignment = msg->w_alignment;
+  _w_frontier = msg->w_frontier;
+  _w_obstacle = msg->w_obstacle;
+  _separation_radius = msg->separation_radius;
+  _neighbor_radius = msg->neighbor_radius;
+  _max_swarm_speed = msg->max_swarm_speed;
+  _swarm_altitude = msg->altitude;
+
+  if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
+    // Only rebuild grid if dimensions actually changed
+    if (std::abs(msg->cell_size - _grid_cell_size) > 0.001 ||
+        std::abs(msg->map_width - _grid_width) > 0.1 ||
+        std::abs(msg->map_height - _grid_height) > 0.1) {
+      RCLCPP_INFO(this->get_logger(), "[SWARM] Grid config changed, rebuilding grid");
+      _grid_cell_size = msg->cell_size;
+      _grid_width = msg->map_width;
+      _grid_height = msg->map_height;
+      _grid_cols = static_cast<int>(_grid_width / _grid_cell_size);
+      _grid_rows = static_cast<int>(_grid_height / _grid_cell_size);
+      const std::lock_guard<std::mutex> lock(_grid_mutex);
+      _occupancy_grid.assign(_grid_cols * _grid_rows, 0);
+      _cells_explored = 0;
+    }
+  }
+}
+
+void PlannerNode::neighbor_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg, int neighbor_id) {
+  const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+  auto& ns = _neighbor_states[neighbor_id];
+  ns.position = Eigen::Vector3d(msg->pose.pose.position.x,
+                                 msg->pose.pose.position.y,
+                                 msg->pose.pose.position.z);
+  ns.velocity = Eigen::Vector3d(msg->twist.twist.linear.x,
+                                 msg->twist.twist.linear.y,
+                                 msg->twist.twist.linear.z);
+  // Extract yaw from quaternion
+  double qw = msg->pose.pose.orientation.w;
+  double qx = msg->pose.pose.orientation.x;
+  double qy = msg->pose.pose.orientation.y;
+  double qz = msg->pose.pose.orientation.z;
+  ns.yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  ns.last_update = rclcpp::Time(msg->header.stamp);
+  ns.valid = true;
+}
+
+Eigen::Vector2d PlannerNode::world_to_grid(double wx, double wy) const {
+  return Eigen::Vector2d(
+    (wx - _grid_origin_x) / _grid_cell_size,
+    (wy - _grid_origin_y) / _grid_cell_size);
+}
+
+Eigen::Vector2d PlannerNode::grid_to_world(int gx, int gy) const {
+  return Eigen::Vector2d(
+    _grid_origin_x + (gx + 0.5) * _grid_cell_size,
+    _grid_origin_y + (gy + 0.5) * _grid_cell_size);
+}
+
+bool PlannerNode::is_in_grid(int gx, int gy) const {
+  return gx >= 0 && gx < _grid_cols && gy >= 0 && gy < _grid_rows;
+}
+
+void PlannerNode::update_occupancy_grid() {
+  const std::lock_guard<std::mutex> lock(_grid_mutex);
+
+  // Mark cells around current position as free (sensor footprint)
+  double sensor_range = _depth_upper_bound;  // Use planner's max depth as sensing range
+  Eigen::Vector3d pos;
+  double yaw;
+  {
+    const std::lock_guard<std::mutex> slock(state_mutex_);
+    pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+    double qw = _state.pose.orientation.w, qx = _state.pose.orientation.x;
+    double qy = _state.pose.orientation.y, qz = _state.pose.orientation.z;
+    yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+  }
+
+  // Sweep a cone in the camera's FOV and mark cells as free
+  // Camera FOV ≈ 127° horizontal -> ±63.5° from heading
+  double half_fov = 63.5 * M_PI / 180.0;
+  int steps_angle = 64;
+  int steps_range = static_cast<int>(sensor_range / _grid_cell_size);
+
+  for (int a = 0; a <= steps_angle; ++a) {
+    double angle = yaw - half_fov + (2.0 * half_fov * a / steps_angle);
+    for (int r = 1; r <= steps_range; ++r) {
+      double dist = r * _grid_cell_size;
+      double wx = pos.x() + dist * cos(angle);
+      double wy = pos.y() + dist * sin(angle);
+      Eigen::Vector2d gc = world_to_grid(wx, wy);
+      int gx = static_cast<int>(gc.x());
+      int gy = static_cast<int>(gc.y());
+      if (!is_in_grid(gx, gy)) continue;
+      int idx = gy * _grid_cols + gx;
+      if (_occupancy_grid[idx] == 0) {
+        _occupancy_grid[idx] = 1;  // free
+        _cells_explored++;
+      }
+    }
+  }
+
+  // Mark the cell immediately at position as free too
+  Eigen::Vector2d my_gc = world_to_grid(pos.x(), pos.y());
+  int mx = static_cast<int>(my_gc.x()), my = static_cast<int>(my_gc.y());
+  if (is_in_grid(mx, my) && _occupancy_grid[my * _grid_cols + mx] == 0) {
+    _occupancy_grid[my * _grid_cols + mx] = 1;
+    _cells_explored++;
+  }
+}
+
+std::vector<Eigen::Vector2d> PlannerNode::detect_frontiers() {
+  const std::lock_guard<std::mutex> lock(_grid_mutex);
+  std::vector<Eigen::Vector2d> frontiers;
+
+  // A frontier cell is a free cell (1) adjacent to at least one unknown cell (0)
+  static const int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
+  static const int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
+
+  for (int gy = 0; gy < _grid_rows; ++gy) {
+    for (int gx = 0; gx < _grid_cols; ++gx) {
+      int idx = gy * _grid_cols + gx;
+      if (_occupancy_grid[idx] != 1) continue;  // Only free cells
+      bool is_frontier = false;
+      for (int d = 0; d < 8; ++d) {
+        int nx = gx + dx[d], ny = gy + dy[d];
+        if (!is_in_grid(nx, ny)) continue;
+        if (_occupancy_grid[ny * _grid_cols + nx] == 0) {
+          is_frontier = true;
+          break;
+        }
+      }
+      if (is_frontier) {
+        Eigen::Vector2d wc = grid_to_world(gx, gy);
+        frontiers.push_back(wc);
+      }
+    }
+  }
+  return frontiers;
+}
+
+Eigen::Vector2d PlannerNode::select_frontier(const std::vector<Eigen::Vector2d>& frontiers) {
+  if (frontiers.empty()) return Eigen::Vector2d(0, 0);
+
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  Eigen::Vector2d my_pos_2d(my_pos.x(), my_pos.y());
+
+  // Gather neighbor positions for frontier deconfliction
+  std::vector<Eigen::Vector2d> neighbor_positions;
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;  // Stale neighbor
+      neighbor_positions.emplace_back(ns.position.x(), ns.position.y());
+    }
+  }
+
+  // Score each frontier: prefer close to self, far from neighbors
+  double best_score = std::numeric_limits<double>::max();
+  Eigen::Vector2d best_frontier = frontiers[0];
+
+  for (const auto& f : frontiers) {
+    double dist_self = (f - my_pos_2d).norm();
+
+    // Penalty for frontiers that are closer to another drone
+    double neighbor_penalty = 0.0;
+    for (const auto& np : neighbor_positions) {
+      double dist_neighbor = (f - np).norm();
+      if (dist_neighbor < dist_self) {
+        // Another drone is closer — add penalty proportional to how much closer
+        neighbor_penalty += (dist_self - dist_neighbor);
+      }
+    }
+
+    // Simple cost: distance + neighbor penalty (encourages spatial distribution)
+    double score = dist_self + 2.0 * neighbor_penalty;
+    if (score < best_score) {
+      best_score = score;
+      best_frontier = f;
+    }
+  }
+  return best_frontier;
+}
+
+Eigen::Vector3d PlannerNode::compute_cohesion() {
+  // Reynolds rule 1: Steer toward average position of neighbors
+  Eigen::Vector3d centroid(0, 0, 0);
+  int count = 0;
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      double dist = (ns.position - my_pos).norm();
+      if (dist > _neighbor_radius) continue;
+      centroid += ns.position;
+      count++;
+    }
+  }
+  if (count == 0) return Eigen::Vector3d(0, 0, 0);
+  centroid /= count;
+  Eigen::Vector3d steer = centroid - my_pos;
+  double mag = steer.norm();
+  if (mag > 0.01) steer = steer / mag;  // Normalize
+  return steer;
+}
+
+Eigen::Vector3d PlannerNode::compute_separation() {
+  // Reynolds rule 2: Steer away from nearby neighbors
+  Eigen::Vector3d repulsion(0, 0, 0);
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      Eigen::Vector3d diff = my_pos - ns.position;
+      double dist = diff.norm();
+      if (dist < 0.01 || dist > _separation_radius) continue;
+      // Inverse-square repulsion
+      repulsion += diff / (dist * dist);
+    }
+  }
+  double mag = repulsion.norm();
+  if (mag > 0.01) repulsion = repulsion / mag;
+  return repulsion;
+}
+
+Eigen::Vector3d PlannerNode::compute_alignment() {
+  // Reynolds rule 3: Match average heading of neighbors
+  Eigen::Vector3d avg_vel(0, 0, 0);
+  int count = 0;
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      double dist = (ns.position - my_pos).norm();
+      if (dist > _neighbor_radius) continue;
+      avg_vel += ns.velocity;
+      count++;
+    }
+  }
+  if (count == 0) return Eigen::Vector3d(0, 0, 0);
+  avg_vel /= count;
+  double mag = avg_vel.norm();
+  if (mag > 0.01) avg_vel = avg_vel / mag;
+  return avg_vel;
+}
+
+Eigen::Vector3d PlannerNode::compute_frontier_attraction(const Eigen::Vector2d& target_frontier) {
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  Eigen::Vector3d frontier_3d(target_frontier.x(), target_frontier.y(), _swarm_altitude);
+  Eigen::Vector3d steer = frontier_3d - my_pos;
+  double mag = steer.norm();
+  if (mag > 0.01) steer = steer / mag;
+  return steer;
+}
+
+void PlannerNode::swarm_exploration_loop() {
+  if (!_swarm_mode) return;
+  if (_planner_state == PlanningStates::OFF || _planner_state == PlanningStates::TAKING_OFF) return;
+
+  // 1. Update occupancy grid from depth observations
+  update_occupancy_grid();
+
+  // 2. Detect frontiers
+  auto frontiers = detect_frontiers();
+  _frontiers_remaining = frontiers.size();
+
+  // 3. Select best frontier for this drone
+  if (!frontiers.empty()) {
+    _assigned_frontier = select_frontier(frontiers);
+    _has_frontier = true;
+  } else {
+    _has_frontier = false;
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+      "[SWARM] No frontiers remaining — exploration complete!");
+    return;
+  }
+
+  // 4. Compute Reynolds flocking forces + frontier attraction
+  Eigen::Vector3d cohesion_force = compute_cohesion();
+  Eigen::Vector3d separation_force = compute_separation();
+  Eigen::Vector3d alignment_force = compute_alignment();
+  Eigen::Vector3d frontier_force = compute_frontier_attraction(_assigned_frontier);
+
+  // 5. Blend forces
+  Eigen::Vector3d combined_velocity =
+    _w_cohesion * cohesion_force +
+    _w_separation * separation_force +
+    _w_alignment * alignment_force +
+    _w_frontier * frontier_force;
+
+  // Enforce altitude
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;  // P-controller for altitude
+  }
+
+  // Clamp speed
+  double speed = combined_velocity.head<2>().norm();
+  if (speed > _max_swarm_speed) {
+    combined_velocity.head<2>() *= _max_swarm_speed / speed;
+  }
+
+  // 6. Set goal = current position + velocity * lookahead
+  double lookahead = 2.0;  // seconds
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+
+  Eigen::Vector3d target_pos = my_pos + combined_velocity * lookahead;
+
+  // Clamp to fence
+  target_pos.x() = std::clamp(target_pos.x(), _fence_min_x, _fence_max_x);
+  target_pos.y() = std::clamp(target_pos.y(), _fence_min_y, _fence_max_y);
+  target_pos.z() = std::clamp(target_pos.z(), _fence_min_z, _fence_max_z);
+
+  // 7. Compute heading from velocity direction
+  _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
+
+  // 8. Directly publish setpoint to OmniDrones
+  //    The depth planner may override this if it generates an obstacle-avoidance trajectory,
+  //    but this ensures the drone moves even when no obstacles/trajectories are present.
+  TrajectoryPoint swarm_ref;
+  swarm_ref.position = target_pos;
+  swarm_ref.velocity = combined_velocity;
+  swarm_ref.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+  swarm_ref.heading = _goal_heading;
+  public_ref_pos(swarm_ref);
+
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "[SWARM] drone=%d frontiers=%zu goal=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f) coh=(%.2f,%.2f) sep=(%.2f,%.2f) fro=(%.2f,%.2f)",
+    _drone_id, frontiers.size(),
+    _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
+    combined_velocity.x(), combined_velocity.y(), combined_velocity.z(),
+    cohesion_force.x(), cohesion_force.y(),
+    separation_force.x(), separation_force.y(),
+    frontier_force.x(), frontier_force.y());
+}
+
+void PlannerNode::publish_swarm_status() {
+  if (!_swarm_mode) return;
+
+  auto msg = ground_system_msgs::msg::SwarmExplorationStatus();
+  msg.header.stamp = this->now();
+  msg.drone_id = _drone_id;
+
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    msg.position.x = _state.pose.position.x;
+    msg.position.y = _state.pose.position.y;
+    msg.position.z = _state.pose.position.z;
+    double qw = _state.pose.orientation.w, qx = _state.pose.orientation.x;
+    double qy = _state.pose.orientation.y, qz = _state.pose.orientation.z;
+    msg.yaw_rad = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+    msg.velocity.x = _state.velocity.linear.x;
+    msg.velocity.y = _state.velocity.linear.y;
+    msg.velocity.z = _state.velocity.linear.z;
+  }
+
+  if (_planner_state == PlanningStates::TRAJECTORY_CONTROL) {
+    msg.state = ground_system_msgs::msg::SwarmExplorationStatus::STATE_EXPLORING;
+  } else {
+    msg.state = ground_system_msgs::msg::SwarmExplorationStatus::STATE_IDLE;
+  }
+
+  if (_has_frontier) {
+    msg.assigned_frontier.x = _assigned_frontier.x();
+    msg.assigned_frontier.y = _assigned_frontier.y();
+    msg.assigned_frontier.z = _swarm_altitude;
+    Eigen::Vector3d my_pos(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+    msg.distance_to_frontier = (Eigen::Vector2d(_assigned_frontier.x(), _assigned_frontier.y()) -
+                                 Eigen::Vector2d(my_pos.x(), my_pos.y())).norm();
+  }
+  msg.frontiers_remaining = _frontiers_remaining;
+
+  uint32_t total = _grid_cols * _grid_rows;
+  msg.cells_explored = _cells_explored;
+  msg.total_cells = total;
+  msg.coverage_percent = (total > 0) ? (100.0f * _cells_explored / total) : 0.0f;
+
+  // Neighbor info
+  int num_neighbors = 0;
+  double nearest_dist = std::numeric_limits<double>::max();
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      double dist = (ns.position - my_pos).norm();
+      if (dist <= _neighbor_radius) {
+        num_neighbors++;
+        nearest_dist = std::min(nearest_dist, dist);
+      }
+    }
+  }
+  msg.num_neighbors = num_neighbors;
+  msg.nearest_neighbor_dist = (nearest_dist < 1e6) ? nearest_dist : 0.0;
+
+  swarm_status_pub->publish(msg);
+}
+
+void PlannerNode::publish_occupancy_grid() {
+  if (!_swarm_mode) return;
+
+  auto msg = ground_system_msgs::msg::OccupancyGrid2D();
+  msg.header.stamp = this->now();
+  msg.drone_id = _drone_id;
+  msg.cell_size = _grid_cell_size;
+  msg.origin_x = _grid_origin_x;
+  msg.origin_y = _grid_origin_y;
+  msg.width = _grid_cols;
+  msg.height = _grid_rows;
+
+  {
+    const std::lock_guard<std::mutex> lock(_grid_mutex);
+    msg.data = _occupancy_grid;
+  }
+
+  occupancy_grid_pub->publish(msg);
 }

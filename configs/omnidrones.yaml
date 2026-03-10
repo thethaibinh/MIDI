@@ -45,6 +45,9 @@ planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.9
 acc_planning_threshold: 0.1
 vel_planning_threshold: 0.4          # New: Lateral and vertical velocity threshold (m/s)
+depth_age_threshold: 0.05                 # Max age of depth image (s) before rejection (relaxed for sim)
+state_age_threshold: 0.05                 # Max age of state estimate (s) before rejection
+transform_age_threshold: 0.05             # Max age of TF transforms (s) before rejection
 sampled_trajectories_threshold: 20000    # Lowered for OmniDrones simulation
 checked_trajectories_threshold: 200    # Lowered - accept trajectory once we have 3 checked
 3d_planning: yes                 # Use 3D planning
@@ -96,3 +99,20 @@ trajectory_discretisation_cycle: 0.01  # Control update rate (100 Hz)
 go_to_goal_threshold: 1.5              # Distance to switch to goal mode (m)
 mavros_control_mode: "kinematic"       # Not used in OmniDrones mode
 setpoint_type: "full"            # "position" or "full" control mode, "full" includes velocity and acceleration feedforward
+
+# Frontier-Led Swarm Exploration defaults
+# These can be overridden at runtime via /swarm_params topic from ground GUI
+swarm:
+  num_drones: 3
+  w_cohesion: 0.8         # Pull toward swarm centroid
+  w_separation: 1.5       # Push away from nearby drones
+  w_alignment: 0.5        # Match neighbor heading
+  w_frontier: 1.2         # Attraction toward nearest frontier
+  w_obstacle: 2.0         # Repulsion from obstacles (via MIDI depth)
+  separation_radius: 3.0  # Min distance between drones (m)
+  neighbor_radius: 10.0   # Radius to consider neighbors (m)
+  max_swarm_speed: 1.5    # Max velocity during swarm exploration (m/s)
+  altitude: 1.5           # Exploration altitude (m)
+  cell_size: 0.5          # Occupancy grid cell size (m)
+  map_width: 60.0         # Map width (m)
+  map_height: 60.0        # Map height (m)
