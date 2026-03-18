@@ -254,8 +254,26 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     {
       const std::lock_guard<std::mutex> lock(_grid_mutex);
       _occupancy_grid.assign(_grid_cols * _grid_rows, 0);  // All unknown
+      _visit_counts.assign(_grid_cols * _grid_rows, 0);    // No visits
+      _last_visit_time.assign(_grid_cols * _grid_rows, 0.0);
       _cells_explored = 0;
     }
+
+    // Initialize task allocation state
+    {
+      const std::lock_guard<std::mutex> lock(_task_mutex);
+      _known_tasks.clear();
+      _next_task_id = 1;
+      _task_state = 0;  // SWARMING
+      _current_task_id = 0;
+      _task_exec_start_time = 0.0;
+    }
+    _task_rng.seed(static_cast<uint32_t>(_drone_id * 1000 + std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    // Initialize metrics
+    _metrics_total_timesteps = 0;
+    _metrics_agent_collision_count = 0;
+    _metrics_wall_collision_count = 0;
 
     _home_in_world_frame = _state.pose.position;
 
@@ -292,6 +310,20 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     occupancy_pub_timer_ = this->create_wall_timer(
       std::chrono::seconds(1),
       std::bind(&PlannerNode::publish_occupancy_grid, this));
+
+    // Metrics publisher timer (0.5 Hz)
+    swarm_metrics_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(2000),
+      std::bind(&PlannerNode::publish_swarm_metrics, this));
+
+    // Task topic pub/sub
+    swarm_task_pub = this->create_publisher<ground_system_msgs::msg::SwarmTask>("/swarm_tasks", 10);
+    swarm_task_sub = this->create_subscription<ground_system_msgs::msg::SwarmTask>(
+      "/swarm_tasks", 10,
+      std::bind(&PlannerNode::task_callback, this, std::placeholders::_1));
+
+    // Metrics publisher
+    swarm_metrics_pub = this->create_publisher<ground_system_msgs::msg::SwarmMetrics>("/swarm_metrics", 10);
 
     return;
   }
@@ -579,14 +611,26 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _swarm_mode = false;
   _has_frontier = false;
   _frontiers_remaining = 0;
+  _task_state = 0;
+  _current_task_id = 0;
   if (swarm_exploration_timer_) { swarm_exploration_timer_->cancel(); swarm_exploration_timer_.reset(); }
   if (swarm_status_timer_) { swarm_status_timer_->cancel(); swarm_status_timer_.reset(); }
   if (occupancy_pub_timer_) { occupancy_pub_timer_->cancel(); occupancy_pub_timer_.reset(); }
+  if (swarm_metrics_timer_) { swarm_metrics_timer_->cancel(); swarm_metrics_timer_.reset(); }
   {
     const std::lock_guard<std::mutex> lock(_grid_mutex);
     _occupancy_grid.clear();
+    _visit_counts.clear();
+    _last_visit_time.clear();
     _cells_explored = 0;
   }
+  {
+    const std::lock_guard<std::mutex> lock(_task_mutex);
+    _known_tasks.clear();
+  }
+  _metrics_total_timesteps = 0;
+  _metrics_agent_collision_count = 0;
+  _metrics_wall_collision_count = 0;
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
@@ -807,10 +851,17 @@ void PlannerNode::update_planner_state() {
   // No fixed goal to approach, so skip distance-based transitions
   if (_swarm_mode) {
     double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
-    if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
-      RCLCPP_INFO(this->get_logger(), "[SWARM] Takeoff complete at z=%.2f, transitioning to TRAJECTORY_CONTROL",
-                  _state.pose.position.z);
-      set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+    if (_planner_state == PlanningStates::TAKING_OFF) {
+      // OmniDrones: drones spawn already at altitude, skip takeoff if z is valid
+      if (_runtime_mode == RuntimeModes::OMNIDRONES && _state.pose.position.z > 0.3) {
+        RCLCPP_INFO(this->get_logger(), "[SWARM] OmniDrones takeoff skipped (already at z=%.2f), transitioning to TRAJECTORY_CONTROL",
+                    _state.pose.position.z);
+        set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+      } else if (_state.pose.position.z >= takeoff_complete_altitude) {
+        RCLCPP_INFO(this->get_logger(), "[SWARM] Takeoff complete at z=%.2f, transitioning to TRAJECTORY_CONTROL",
+                    _state.pose.position.z);
+        set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+      }
     }
     return;  // Swarm loop handles everything else
   }
@@ -1682,7 +1733,7 @@ void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) 
 }
 
 // =============================================================================
-// Frontier-Led Swarming Implementation
+// Dynamic Frontier-Led Swarming with Task Allocation & Metrics
 // =============================================================================
 
 void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmParams::SharedPtr msg) {
@@ -1698,8 +1749,16 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
   _max_swarm_speed = msg->max_swarm_speed;
   _swarm_altitude = msg->altitude;
 
+  // Frontier utility weights
+  if (msg->psi_distance > 0.0) _psi_distance = msg->psi_distance;
+  if (msg->psi_size > 0.0) _psi_size = msg->psi_size;
+
+  // Task allocation params
+  _enable_task_allocation = msg->enable_task_allocation;
+  if (msg->task_spawn_probability > 0.0) _task_spawn_probability = msg->task_spawn_probability;
+  if (msg->task_proximity_threshold > 0.0) _task_proximity_threshold = msg->task_proximity_threshold;
+
   if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
-    // Only rebuild grid if dimensions actually changed
     if (std::abs(msg->cell_size - _grid_cell_size) > 0.001 ||
         std::abs(msg->map_width - _grid_width) > 0.1 ||
         std::abs(msg->map_height - _grid_height) > 0.1) {
@@ -1709,8 +1768,16 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
       _grid_height = msg->map_height;
       _grid_cols = static_cast<int>(_grid_width / _grid_cell_size);
       _grid_rows = static_cast<int>(_grid_height / _grid_cell_size);
+      // Re-center grid on current drone position
+      {
+        const std::lock_guard<std::mutex> slock(state_mutex_);
+        _grid_origin_x = _state.pose.position.x - _grid_width / 2.0;
+        _grid_origin_y = _state.pose.position.y - _grid_height / 2.0;
+      }
       const std::lock_guard<std::mutex> lock(_grid_mutex);
       _occupancy_grid.assign(_grid_cols * _grid_rows, 0);
+      _visit_counts.assign(_grid_cols * _grid_rows, 0);
+      _last_visit_time.assign(_grid_cols * _grid_rows, 0.0);
       _cells_explored = 0;
     }
   }
@@ -1725,7 +1792,6 @@ void PlannerNode::neighbor_odom_callback(const nav_msgs::msg::Odometry::SharedPt
   ns.velocity = Eigen::Vector3d(msg->twist.twist.linear.x,
                                  msg->twist.twist.linear.y,
                                  msg->twist.twist.linear.z);
-  // Extract yaw from quaternion
   double qw = msg->pose.pose.orientation.w;
   double qx = msg->pose.pose.orientation.x;
   double qy = msg->pose.pose.orientation.y;
@@ -1754,8 +1820,7 @@ bool PlannerNode::is_in_grid(int gx, int gy) const {
 void PlannerNode::update_occupancy_grid() {
   const std::lock_guard<std::mutex> lock(_grid_mutex);
 
-  // Mark cells around current position as free (sensor footprint)
-  double sensor_range = _depth_upper_bound;  // Use planner's max depth as sensing range
+  double sensor_range = _swarm_sensor_range;
   Eigen::Vector3d pos;
   double yaw;
   {
@@ -1766,71 +1831,143 @@ void PlannerNode::update_occupancy_grid() {
     yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
   }
 
-  // Sweep a cone in the camera's FOV and mark cells as free
-  // Camera FOV ≈ 127° horizontal -> ±63.5° from heading
-  double half_fov = 63.5 * M_PI / 180.0;
-  int steps_angle = 64;
-  int steps_range = static_cast<int>(sensor_range / _grid_cell_size);
+  double current_time = this->now().seconds();
+  // Downward-camera model: mark all grid cells within sensor_range of
+  // the drone's (x,y) as explored — equivalent to a ground robot with
+  // a circular observation footprint (2D disc).
+  int r_cells = static_cast<int>(std::ceil(sensor_range / _grid_cell_size));
+  Eigen::Vector2d my_gc = world_to_grid(pos.x(), pos.y());
+  int cx = static_cast<int>(my_gc.x());
+  int cy = static_cast<int>(my_gc.y());
+  double range_sq = sensor_range * sensor_range;
 
-  for (int a = 0; a <= steps_angle; ++a) {
-    double angle = yaw - half_fov + (2.0 * half_fov * a / steps_angle);
-    for (int r = 1; r <= steps_range; ++r) {
-      double dist = r * _grid_cell_size;
-      double wx = pos.x() + dist * cos(angle);
-      double wy = pos.y() + dist * sin(angle);
-      Eigen::Vector2d gc = world_to_grid(wx, wy);
-      int gx = static_cast<int>(gc.x());
-      int gy = static_cast<int>(gc.y());
+  // One-time diagnostic to verify disc model is compiled and active
+  static bool diag_printed = false;
+  if (!diag_printed) {
+    RCLCPP_WARN(this->get_logger(),
+      "[DISC-MODEL] sensor_range=%.1f cell_size=%.1f r_cells=%d grid=%dx%d drone=%d pos=(%.1f,%.1f) cell=(%d,%d)",
+      sensor_range, _grid_cell_size, r_cells, _grid_cols, _grid_rows,
+      _drone_id, pos.x(), pos.y(), cx, cy);
+    diag_printed = true;
+  }
+
+  int new_cells = 0;
+  for (int dy = -r_cells; dy <= r_cells; ++dy) {
+    for (int dx = -r_cells; dx <= r_cells; ++dx) {
+      int gx = cx + dx;
+      int gy = cy + dy;
       if (!is_in_grid(gx, gy)) continue;
+      // Check actual world distance (cell center to drone position)
+      Eigen::Vector2d cell_world = grid_to_world(gx, gy);
+      double dist_sq = (cell_world.x() - pos.x()) * (cell_world.x() - pos.x()) +
+                       (cell_world.y() - pos.y()) * (cell_world.y() - pos.y());
+      if (dist_sq > range_sq) continue;
       int idx = gy * _grid_cols + gx;
       if (_occupancy_grid[idx] == 0) {
-        _occupancy_grid[idx] = 1;  // free
+        _occupancy_grid[idx] = 1;  // free/explored
         _cells_explored++;
+        new_cells++;
       }
+      _visit_counts[idx]++;
+      _last_visit_time[idx] = current_time;
     }
   }
 
-  // Mark the cell immediately at position as free too
-  Eigen::Vector2d my_gc = world_to_grid(pos.x(), pos.y());
-  int mx = static_cast<int>(my_gc.x()), my = static_cast<int>(my_gc.y());
-  if (is_in_grid(mx, my) && _occupancy_grid[my * _grid_cols + mx] == 0) {
-    _occupancy_grid[my * _grid_cols + mx] = 1;
-    _cells_explored++;
+  // Periodic diagnostic: log when new cells are explored
+  if (new_cells > 0) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+      "[DISC-MODEL] drone=%d explored %d new cells (total=%d/%d) pos=(%.1f,%.1f)",
+      _drone_id, new_cells, _cells_explored, _grid_cols * _grid_rows, pos.x(), pos.y());
   }
 }
 
-std::vector<Eigen::Vector2d> PlannerNode::detect_frontiers() {
-  const std::lock_guard<std::mutex> lock(_grid_mutex);
-  std::vector<Eigen::Vector2d> frontiers;
+// =============================================================================
+// Dynamic Frontier Region Grouping (BFS-based)
+// =============================================================================
 
-  // A frontier cell is a free cell (1) adjacent to at least one unknown cell (0)
+std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
+  const std::lock_guard<std::mutex> lock(_grid_mutex);
+
+  // Identify all frontier cells (free cell adjacent to unknown)
   static const int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
   static const int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
 
+  std::vector<bool> is_frontier(_grid_cols * _grid_rows, false);
   for (int gy = 0; gy < _grid_rows; ++gy) {
     for (int gx = 0; gx < _grid_cols; ++gx) {
       int idx = gy * _grid_cols + gx;
-      if (_occupancy_grid[idx] != 1) continue;  // Only free cells
-      bool is_frontier = false;
+      if (_occupancy_grid[idx] != 1) continue;
       for (int d = 0; d < 8; ++d) {
         int nx = gx + dx[d], ny = gy + dy[d];
         if (!is_in_grid(nx, ny)) continue;
         if (_occupancy_grid[ny * _grid_cols + nx] == 0) {
-          is_frontier = true;
+          is_frontier[idx] = true;
           break;
         }
       }
-      if (is_frontier) {
-        Eigen::Vector2d wc = grid_to_world(gx, gy);
-        frontiers.push_back(wc);
+    }
+  }
+
+  // BFS flood-fill to group connected frontier cells into regions
+  std::vector<bool> visited(_grid_cols * _grid_rows, false);
+  std::vector<FrontierRegion> regions;
+
+  for (int gy = 0; gy < _grid_rows; ++gy) {
+    for (int gx = 0; gx < _grid_cols; ++gx) {
+      int idx = gy * _grid_cols + gx;
+      if (!is_frontier[idx] || visited[idx]) continue;
+
+      // BFS from this frontier cell
+      FrontierRegion region;
+      region.size = 0;
+      region.avg_last_visit = 0.0;
+      double sum_x = 0.0, sum_y = 0.0, sum_visit = 0.0;
+
+      std::queue<std::pair<int, int>> bfs_queue;
+      bfs_queue.push({gx, gy});
+      visited[idx] = true;
+
+      while (!bfs_queue.empty()) {
+        auto [cx, cy] = bfs_queue.front();
+        bfs_queue.pop();
+
+        int cidx = cy * _grid_cols + cx;
+        Eigen::Vector2d wc = grid_to_world(cx, cy);
+        sum_x += wc.x();
+        sum_y += wc.y();
+        sum_visit += _last_visit_time[cidx];
+        region.size++;
+        region.cells.push_back(wc);
+
+        // Expand to 8-connected frontier neighbors
+        for (int d = 0; d < 8; ++d) {
+          int nnx = cx + dx[d], nny = cy + dy[d];
+          if (!is_in_grid(nnx, nny)) continue;
+          int nidx = nny * _grid_cols + nnx;
+          if (is_frontier[nidx] && !visited[nidx]) {
+            visited[nidx] = true;
+            bfs_queue.push({nnx, nny});
+          }
+        }
+      }
+
+      if (region.size > 0) {
+        region.centroid = Eigen::Vector2d(sum_x / region.size, sum_y / region.size);
+        region.avg_last_visit = sum_visit / region.size;
+        regions.push_back(region);
       }
     }
   }
-  return frontiers;
+  return regions;
 }
 
-Eigen::Vector2d PlannerNode::select_frontier(const std::vector<Eigen::Vector2d>& frontiers) {
-  if (frontiers.empty()) return Eigen::Vector2d(0, 0);
+// =============================================================================
+// Utility-Based Frontier Selection
+// =============================================================================
+
+PlannerNode::FrontierRegion PlannerNode::select_frontier_region(
+    const std::vector<FrontierRegion>& regions) {
+  if (regions.empty()) return FrontierRegion{};
 
   Eigen::Vector3d my_pos;
   {
@@ -1839,47 +1976,49 @@ Eigen::Vector2d PlannerNode::select_frontier(const std::vector<Eigen::Vector2d>&
   }
   Eigen::Vector2d my_pos_2d(my_pos.x(), my_pos.y());
 
-  // Gather neighbor positions for frontier deconfliction
+  double current_time = this->now().seconds();
+
+  // Gather neighbor positions for deconfliction
   std::vector<Eigen::Vector2d> neighbor_positions;
   {
     const std::lock_guard<std::mutex> lock(_neighbor_mutex);
     for (auto& [id, ns] : _neighbor_states) {
       if (!ns.valid) continue;
       double age = (this->now() - ns.last_update).seconds();
-      if (age > 2.0) continue;  // Stale neighbor
+      if (age > 2.0) continue;
       neighbor_positions.emplace_back(ns.position.x(), ns.position.y());
     }
   }
 
-  // Score each frontier: prefer close to self, far from neighbors
-  double best_score = std::numeric_limits<double>::max();
-  Eigen::Vector2d best_frontier = frontiers[0];
+  // Score each region: utility = psi_distance * distance - psi_size * size - time_since_visit
+  // Lower utility = better frontier
+  double best_utility = std::numeric_limits<double>::max();
+  size_t best_idx = 0;
 
-  for (const auto& f : frontiers) {
-    double dist_self = (f - my_pos_2d).norm();
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const auto& r = regions[i];
+    double dist = (r.centroid - my_pos_2d).norm();
+    double time_since = current_time - r.avg_last_visit;
 
-    // Penalty for frontiers that are closer to another drone
-    double neighbor_penalty = 0.0;
+    double utility = _psi_distance * dist - _psi_size * r.size - time_since;
+
+    // Neighbor penalty: penalize regions closer to other drones
     for (const auto& np : neighbor_positions) {
-      double dist_neighbor = (f - np).norm();
-      if (dist_neighbor < dist_self) {
-        // Another drone is closer — add penalty proportional to how much closer
-        neighbor_penalty += (dist_self - dist_neighbor);
+      double dist_neighbor = (r.centroid - np).norm();
+      if (dist_neighbor < dist) {
+        utility += 2.0 * (dist - dist_neighbor);
       }
     }
 
-    // Simple cost: distance + neighbor penalty (encourages spatial distribution)
-    double score = dist_self + 2.0 * neighbor_penalty;
-    if (score < best_score) {
-      best_score = score;
-      best_frontier = f;
+    if (utility < best_utility) {
+      best_utility = utility;
+      best_idx = i;
     }
   }
-  return best_frontier;
+  return regions[best_idx];
 }
 
 Eigen::Vector3d PlannerNode::compute_cohesion() {
-  // Reynolds rule 1: Steer toward average position of neighbors
   Eigen::Vector3d centroid(0, 0, 0);
   int count = 0;
   Eigen::Vector3d my_pos;
@@ -1903,12 +2042,11 @@ Eigen::Vector3d PlannerNode::compute_cohesion() {
   centroid /= count;
   Eigen::Vector3d steer = centroid - my_pos;
   double mag = steer.norm();
-  if (mag > 0.01) steer = steer / mag;  // Normalize
+  if (mag > 0.01) steer = steer / mag;
   return steer;
 }
 
 Eigen::Vector3d PlannerNode::compute_separation() {
-  // Reynolds rule 2: Steer away from nearby neighbors
   Eigen::Vector3d repulsion(0, 0, 0);
   Eigen::Vector3d my_pos;
   {
@@ -1924,7 +2062,6 @@ Eigen::Vector3d PlannerNode::compute_separation() {
       Eigen::Vector3d diff = my_pos - ns.position;
       double dist = diff.norm();
       if (dist < 0.01 || dist > _separation_radius) continue;
-      // Inverse-square repulsion
       repulsion += diff / (dist * dist);
     }
   }
@@ -1934,7 +2071,6 @@ Eigen::Vector3d PlannerNode::compute_separation() {
 }
 
 Eigen::Vector3d PlannerNode::compute_alignment() {
-  // Reynolds rule 3: Match average heading of neighbors
   Eigen::Vector3d avg_vel(0, 0, 0);
   int count = 0;
   Eigen::Vector3d my_pos;
@@ -1974,45 +2110,362 @@ Eigen::Vector3d PlannerNode::compute_frontier_attraction(const Eigen::Vector2d& 
   return steer;
 }
 
+Eigen::Vector3d PlannerNode::compute_boundary_repulsion() {
+  double margin = _separation_radius;
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+
+  double min_x = _grid_origin_x;
+  double max_x = _grid_origin_x + _grid_width;
+  double min_y = _grid_origin_y;
+  double max_y = _grid_origin_y + _grid_height;
+
+  Eigen::Vector3d repulsion(0.0, 0.0, 0.0);
+
+  double dx_min = my_pos.x() - min_x;
+  double dx_max = max_x - my_pos.x();
+  double dy_min = my_pos.y() - min_y;
+  double dy_max = max_y - my_pos.y();
+
+  if (dx_min < margin && dx_min > 0.01) repulsion.x() += (margin - dx_min) / margin;
+  if (dx_max < margin && dx_max > 0.01) repulsion.x() -= (margin - dx_max) / margin;
+  if (dy_min < margin && dy_min > 0.01) repulsion.y() += (margin - dy_min) / margin;
+  if (dy_max < margin && dy_max > 0.01) repulsion.y() -= (margin - dy_max) / margin;
+
+  return repulsion;
+}
+
+// =============================================================================
+// Task Allocation
+// =============================================================================
+
+void PlannerNode::task_callback(const ground_system_msgs::msg::SwarmTask::SharedPtr msg) {
+  const std::lock_guard<std::mutex> lock(_task_mutex);
+
+  // Find existing task or add new one
+  for (auto& t : _known_tasks) {
+    if (t.id == msg->task_id) {
+      t.assigned_drone = msg->assigned_drone_id;
+      t.status = msg->status;
+      return;
+    }
+  }
+
+  // New task
+  SwarmTaskData task;
+  task.id = msg->task_id;
+  task.location = Eigen::Vector3d(msg->location.x, msg->location.y, msg->location.z);
+  task.duration = msg->duration;
+  task.priority = msg->priority;
+  task.assigned_drone = msg->assigned_drone_id;
+  task.status = msg->status;
+  task.spawn_time = msg->spawn_time;
+  _known_tasks.push_back(task);
+
+  RCLCPP_INFO(this->get_logger(), "[TASK] Received task %u at (%.1f,%.1f) dur=%.0fs pri=%d status=%d",
+              task.id, task.location.x(), task.location.y(), task.duration, task.priority, task.status);
+
+  // If unassigned and we're idle (swarming), try to bid
+  if (task.status == 0 && _task_state == 0) {
+    run_task_auction();
+  }
+}
+
+void PlannerNode::spawn_tasks() {
+  if (!_enable_task_allocation || _drone_id != 1) return;
+
+  // Count active tasks (not completed)
+  int active_count = 0;
+  {
+    const std::lock_guard<std::mutex> lock(_task_mutex);
+    for (const auto& t : _known_tasks) {
+      if (t.status < 3) active_count++;
+    }
+  }
+  int max_tasks = static_cast<int>(0.75 * _num_drones);
+  if (active_count >= max_tasks) return;
+
+  // Probabilistic spawning
+  std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+  if (prob_dist(_task_rng) > _task_spawn_probability) return;
+
+  // Random location within grid bounds
+  std::uniform_real_distribution<double> x_dist(_grid_origin_x + _separation_radius,
+                                                 _grid_origin_x + _grid_width - _separation_radius);
+  std::uniform_real_distribution<double> y_dist(_grid_origin_y + _separation_radius,
+                                                 _grid_origin_y + _grid_height - _separation_radius);
+  std::uniform_real_distribution<double> dur_dist(10.0, 60.0);
+  std::uniform_int_distribution<int> pri_dist(1, 5);
+
+  auto msg = ground_system_msgs::msg::SwarmTask();
+  msg.header.stamp = this->now();
+  msg.task_id = _next_task_id++;
+  msg.location.x = x_dist(_task_rng);
+  msg.location.y = y_dist(_task_rng);
+  msg.location.z = _swarm_altitude;
+  msg.duration = dur_dist(_task_rng);
+  msg.priority = pri_dist(_task_rng);
+  msg.assigned_drone_id = 0;
+  msg.status = 0;  // UNASSIGNED
+  msg.spawn_time = this->now().seconds();
+
+  swarm_task_pub->publish(msg);
+
+  RCLCPP_INFO(this->get_logger(), "[TASK] Spawned task %u at (%.1f,%.1f) dur=%.0fs pri=%d",
+              msg.task_id, msg.location.x, msg.location.y, msg.duration, msg.priority);
+}
+
+void PlannerNode::run_task_auction() {
+  if (!_enable_task_allocation || _task_state != 0) return;
+
+  const std::lock_guard<std::mutex> lock(_task_mutex);
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> slock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+
+  // Find best unassigned task for this drone
+  double best_bid = -std::numeric_limits<double>::max();
+  uint32_t best_task_id = 0;
+
+  for (const auto& t : _known_tasks) {
+    if (t.status != 0) continue;  // Only bid on unassigned tasks
+
+    double travel_dist = (t.location - my_pos).norm();
+    double shared_reward = 100.0 * t.priority;
+    double bid = shared_reward - travel_dist;
+
+    if (bid > best_bid) {
+      best_bid = bid;
+      best_task_id = t.id;
+    }
+  }
+
+  if (best_task_id == 0) return;
+
+  // Simple winner determination: bid based on priority - distance, tie-break by lower drone_id
+  // Each drone independently computes this; drone with lowest ID among highest bidders wins
+  // For simplicity: assign if we have a positive bid
+  if (best_bid > 0) {
+    // Check if another drone is closer
+    bool another_closer = false;
+    for (const auto& t : _known_tasks) {
+      if (t.id != best_task_id) continue;
+      const std::lock_guard<std::mutex> nlock(_neighbor_mutex);
+      for (auto& [nid, ns] : _neighbor_states) {
+        if (!ns.valid) continue;
+        double age = (this->now() - ns.last_update).seconds();
+        if (age > 2.0) continue;
+        double n_dist = (t.location - ns.position).norm();
+        double my_dist = (t.location - my_pos).norm();
+        if (n_dist < my_dist || (std::abs(n_dist - my_dist) < 0.1 && nid < _drone_id)) {
+          another_closer = true;
+          break;
+        }
+      }
+      break;
+    }
+
+    if (!another_closer) {
+      // Win the auction — assign to self
+      for (auto& t : _known_tasks) {
+        if (t.id == best_task_id) {
+          t.assigned_drone = _drone_id;
+          t.status = 1;  // ASSIGNED
+          _task_state = 1;  // NAVIGATING_TO_TASK
+          _current_task_id = best_task_id;
+
+          // Publish assignment
+          auto msg = ground_system_msgs::msg::SwarmTask();
+          msg.header.stamp = this->now();
+          msg.task_id = t.id;
+          msg.location.x = t.location.x();
+          msg.location.y = t.location.y();
+          msg.location.z = t.location.z();
+          msg.duration = t.duration;
+          msg.priority = t.priority;
+          msg.assigned_drone_id = _drone_id;
+          msg.status = 1;
+          msg.spawn_time = t.spawn_time;
+          swarm_task_pub->publish(msg);
+
+          RCLCPP_INFO(this->get_logger(), "[TASK] Won auction for task %u, navigating to (%.1f,%.1f)",
+                      t.id, t.location.x(), t.location.y());
+          break;
+        }
+      }
+    }
+  }
+}
+
+void PlannerNode::execute_task_state() {
+  if (!_enable_task_allocation || _current_task_id == 0) return;
+
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+
+  const std::lock_guard<std::mutex> lock(_task_mutex);
+  SwarmTaskData* current_task = nullptr;
+  for (auto& t : _known_tasks) {
+    if (t.id == _current_task_id) { current_task = &t; break; }
+  }
+  if (!current_task) {
+    _task_state = 0;
+    _current_task_id = 0;
+    return;
+  }
+
+  if (_task_state == 1) {  // NAVIGATING_TO_TASK
+    double dist = (current_task->location - my_pos).norm();
+    if (dist < _task_proximity_threshold) {
+      // Arrived at task location — start execution
+      _task_state = 2;  // EXECUTING_TASK
+      _task_exec_start_time = this->now().seconds();
+      current_task->status = 2;  // IN_PROGRESS
+
+      auto msg = ground_system_msgs::msg::SwarmTask();
+      msg.header.stamp = this->now();
+      msg.task_id = current_task->id;
+      msg.location.x = current_task->location.x();
+      msg.location.y = current_task->location.y();
+      msg.location.z = current_task->location.z();
+      msg.duration = current_task->duration;
+      msg.priority = current_task->priority;
+      msg.assigned_drone_id = _drone_id;
+      msg.status = 2;
+      msg.spawn_time = current_task->spawn_time;
+      swarm_task_pub->publish(msg);
+
+      RCLCPP_INFO(this->get_logger(), "[TASK] Arrived at task %u, executing for %.0fs",
+                  current_task->id, current_task->duration);
+    }
+  } else if (_task_state == 2) {  // EXECUTING_TASK
+    double elapsed = this->now().seconds() - _task_exec_start_time;
+    if (elapsed >= current_task->duration) {
+      // Task complete
+      current_task->status = 3;  // COMPLETED
+
+      auto msg = ground_system_msgs::msg::SwarmTask();
+      msg.header.stamp = this->now();
+      msg.task_id = current_task->id;
+      msg.location.x = current_task->location.x();
+      msg.location.y = current_task->location.y();
+      msg.location.z = current_task->location.z();
+      msg.duration = current_task->duration;
+      msg.priority = current_task->priority;
+      msg.assigned_drone_id = _drone_id;
+      msg.status = 3;
+      msg.spawn_time = current_task->spawn_time;
+      swarm_task_pub->publish(msg);
+
+      RCLCPP_INFO(this->get_logger(), "[TASK] Completed task %u, returning to swarming",
+                  current_task->id);
+      _task_state = 0;  // SWARMING
+      _current_task_id = 0;
+    }
+  }
+}
+
+// =============================================================================
+// Main Swarm Exploration Loop
+// =============================================================================
+
 void PlannerNode::swarm_exploration_loop() {
   if (!_swarm_mode) return;
   if (_planner_state == PlanningStates::OFF || _planner_state == PlanningStates::TAKING_OFF) return;
 
+  // Increment metrics counter
+  _metrics_total_timesteps++;
+
   // 1. Update occupancy grid from depth observations
   update_occupancy_grid();
 
-  // 2. Detect frontiers
-  auto frontiers = detect_frontiers();
-  _frontiers_remaining = frontiers.size();
+  // 2. Task spawning (drone 1 only)
+  spawn_tasks();
 
-  // 3. Select best frontier for this drone
-  if (!frontiers.empty()) {
-    _assigned_frontier = select_frontier(frontiers);
+  // 3. Task state machine
+  execute_task_state();
+
+  // 4. Detect and group frontier regions
+  auto regions = group_frontier_regions();
+  _frontiers_remaining = 0;
+  for (const auto& r : regions) _frontiers_remaining += r.size;
+
+  // 5. Select best frontier region, then target the nearest cell in it
+  Eigen::Vector2d frontier_target;
+  if (!regions.empty()) {
+    auto best_region = select_frontier_region(regions);
+    // Use the nearest frontier cell to this drone, not the region centroid.
+    // Centroid of a ring-shaped frontier region sits at the center (≈ drone pos),
+    // giving zero attraction.  Nearest-cell pushes each drone outward.
+    Eigen::Vector3d my_pos_ft;
+    {
+      const std::lock_guard<std::mutex> slock(state_mutex_);
+      my_pos_ft = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+    }
+    Eigen::Vector2d my_2d(my_pos_ft.x(), my_pos_ft.y());
+    double best_dist_sq = std::numeric_limits<double>::max();
+    frontier_target = best_region.centroid;  // fallback
+    for (const auto& fc : best_region.cells) {
+      double dsq = (fc - my_2d).squaredNorm();
+      if (dsq < best_dist_sq) {
+        best_dist_sq = dsq;
+        frontier_target = fc;
+      }
+    }
+    _assigned_frontier = frontier_target;
     _has_frontier = true;
   } else {
     _has_frontier = false;
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
       "[SWARM] No frontiers remaining — exploration complete!");
-    return;
   }
 
-  // 4. Compute Reynolds flocking forces + frontier attraction
+  // 6. Compute forces based on current task state
   Eigen::Vector3d cohesion_force = compute_cohesion();
   Eigen::Vector3d separation_force = compute_separation();
   Eigen::Vector3d alignment_force = compute_alignment();
-  Eigen::Vector3d frontier_force = compute_frontier_attraction(_assigned_frontier);
+  Eigen::Vector3d boundary_force = compute_boundary_repulsion();
+  Eigen::Vector3d frontier_force(0, 0, 0);
 
-  // 5. Blend forces
+  if (_task_state == 1 && _current_task_id > 0) {
+    // NAVIGATING_TO_TASK: steer toward task location instead of frontier
+    Eigen::Vector3d task_loc;
+    {
+      const std::lock_guard<std::mutex> lock(_task_mutex);
+      for (const auto& t : _known_tasks) {
+        if (t.id == _current_task_id) { task_loc = t.location; break; }
+      }
+    }
+    Eigen::Vector2d task_2d(task_loc.x(), task_loc.y());
+    frontier_force = compute_frontier_attraction(task_2d);
+  } else if (_task_state == 2) {
+    // EXECUTING_TASK: hover at current position (no frontier/task force)
+    frontier_force = Eigen::Vector3d(0, 0, 0);
+  } else if (_has_frontier) {
+    // SWARMING: normal frontier attraction
+    frontier_force = compute_frontier_attraction(_assigned_frontier);
+  }
+
+  // 7. Blend forces
   Eigen::Vector3d combined_velocity =
     _w_cohesion * cohesion_force +
     _w_separation * separation_force +
     _w_alignment * alignment_force +
-    _w_frontier * frontier_force;
+    _w_frontier * frontier_force +
+    _w_obstacle * boundary_force;
 
   // Enforce altitude
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
-    combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;  // P-controller for altitude
+    combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
   }
 
   // Clamp speed
@@ -2021,43 +2474,88 @@ void PlannerNode::swarm_exploration_loop() {
     combined_velocity.head<2>() *= _max_swarm_speed / speed;
   }
 
-  // 6. Set goal = current position + velocity * lookahead
-  double lookahead = 2.0;  // seconds
+  // If executing task and arrived, reduce horizontal velocity to hover
+  if (_task_state == 2) {
+    combined_velocity.x() = 0.0;
+    combined_velocity.y() = 0.0;
+  }
+
+  // 8. Set goal position = current + velocity * lookahead
+  double lookahead = 2.0;
   Eigen::Vector3d my_pos;
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
   }
-
   Eigen::Vector3d target_pos = my_pos + combined_velocity * lookahead;
-
-  // Clamp to fence
   target_pos.x() = std::clamp(target_pos.x(), _fence_min_x, _fence_max_x);
   target_pos.y() = std::clamp(target_pos.y(), _fence_min_y, _fence_max_y);
   target_pos.z() = std::clamp(target_pos.z(), _fence_min_z, _fence_max_z);
 
-  // 7. Compute heading from velocity direction
   _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
 
-  // 8. Directly publish setpoint to OmniDrones
-  //    The depth planner may override this if it generates an obstacle-avoidance trajectory,
-  //    but this ensures the drone moves even when no obstacles/trajectories are present.
+  // 9. Publish velocity setpoint (paper's algorithm outputs velocity directly)
+  _setpoint_count++;
   TrajectoryPoint swarm_ref;
   swarm_ref.position = target_pos;
   swarm_ref.velocity = combined_velocity;
   swarm_ref.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
   swarm_ref.heading = _goal_heading;
-  public_ref_pos(swarm_ref);
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    publish_velocity_command(swarm_ref);
+  } else {
+    public_ref_pos(swarm_ref);
+  }
+
+  // 10. Collision detection for metrics
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    bool agent_collision = false;
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      double dist = (ns.position - my_pos).norm();
+      if (dist < _collision_radius) {
+        agent_collision = true;
+        break;
+      }
+    }
+    if (agent_collision) _metrics_agent_collision_count++;
+  }
+  {
+    double min_x = _grid_origin_x;
+    double max_x = _grid_origin_x + _grid_width;
+    double min_y = _grid_origin_y;
+    double max_y = _grid_origin_y + _grid_height;
+    bool wall_collision =
+      (my_pos.x() - min_x < _wall_collision_distance) ||
+      (max_x - my_pos.x() < _wall_collision_distance) ||
+      (my_pos.y() - min_y < _wall_collision_distance) ||
+      (max_y - my_pos.y() < _wall_collision_distance);
+    if (wall_collision) _metrics_wall_collision_count++;
+  }
+
+  // Compute setpoint frequency every 2 seconds
+  double now_sec = this->now().seconds();
+  double dt_freq = now_sec - _last_freq_time;
+  double freq_hz = 0.0;
+  if (dt_freq >= 2.0) {
+    freq_hz = static_cast<double>(_setpoint_count - _last_freq_count) / dt_freq;
+    _last_freq_count = _setpoint_count;
+    _last_freq_time = now_sec;
+  }
 
   RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "[SWARM] drone=%d frontiers=%zu goal=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f) coh=(%.2f,%.2f) sep=(%.2f,%.2f) fro=(%.2f,%.2f)",
-    _drone_id, frontiers.size(),
-    _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
-    combined_velocity.x(), combined_velocity.y(), combined_velocity.z(),
-    cohesion_force.x(), cohesion_force.y(),
-    separation_force.x(), separation_force.y(),
-    frontier_force.x(), frontier_force.y());
+    "[SWARM] drone=%d regions=%zu frontiers=%u task_state=%d pos=(%.1f,%.1f) vel=(%.2f,%.2f) setpoint_hz=%.1f",
+    _drone_id, regions.size(), _frontiers_remaining, _task_state,
+    my_pos.x(), my_pos.y(),
+    combined_velocity.x(), combined_velocity.y(), freq_hz);
 }
+
+// =============================================================================
+// Status & Grid Publishing
+// =============================================================================
 
 void PlannerNode::publish_swarm_status() {
   if (!_swarm_mode) return;
@@ -2099,6 +2597,21 @@ void PlannerNode::publish_swarm_status() {
   msg.cells_explored = _cells_explored;
   msg.total_cells = total;
   msg.coverage_percent = (total > 0) ? (100.0f * _cells_explored / total) : 0.0f;
+
+  // Task state
+  msg.task_state = _task_state;
+  msg.current_task_id = _current_task_id;
+  if (_current_task_id > 0) {
+    const std::lock_guard<std::mutex> lock(_task_mutex);
+    for (const auto& t : _known_tasks) {
+      if (t.id == _current_task_id) {
+        msg.task_location.x = t.location.x();
+        msg.task_location.y = t.location.y();
+        msg.task_location.z = t.location.z();
+        break;
+      }
+    }
+  }
 
   // Neighbor info
   int num_neighbors = 0;
@@ -2145,4 +2658,39 @@ void PlannerNode::publish_occupancy_grid() {
   }
 
   occupancy_grid_pub->publish(msg);
+}
+
+void PlannerNode::publish_swarm_metrics() {
+  if (!_swarm_mode) return;
+
+  auto msg = ground_system_msgs::msg::SwarmMetrics();
+  msg.header.stamp = this->now();
+  msg.drone_id = _drone_id;
+
+  uint32_t total = _grid_cols * _grid_rows;
+  msg.coverage_percent = (total > 0) ? (100.0f * _cells_explored / total) : 0.0f;
+
+  // Revisit heatmap
+  {
+    const std::lock_guard<std::mutex> lock(_grid_mutex);
+    msg.visit_counts = _visit_counts;
+  }
+
+  // Collision metrics
+  msg.total_timesteps = _metrics_total_timesteps;
+  msg.agent_collision_count = _metrics_agent_collision_count;
+  msg.wall_collision_count = _metrics_wall_collision_count;
+  msg.agent_collision_rate = (_metrics_total_timesteps > 0) ?
+    static_cast<float>(_metrics_agent_collision_count) / _metrics_total_timesteps : 0.0f;
+  msg.wall_collision_rate = (_metrics_total_timesteps > 0) ?
+    static_cast<float>(_metrics_wall_collision_count) / _metrics_total_timesteps : 0.0f;
+
+  // Grid metadata
+  msg.cell_size = _grid_cell_size;
+  msg.origin_x = _grid_origin_x;
+  msg.origin_y = _grid_origin_y;
+  msg.width = _grid_cols;
+  msg.height = _grid_rows;
+
+  swarm_metrics_pub->publish(msg);
 }

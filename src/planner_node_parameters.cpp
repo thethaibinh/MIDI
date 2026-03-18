@@ -209,8 +209,9 @@ bool PlannerNode::loadParameters() {
     _grid_cell_size = sw["cell_size"].as<double>(0.5);
     _grid_width = sw["map_width"].as<double>(60.0);
     _grid_height = sw["map_height"].as<double>(60.0);
-    RCLCPP_INFO(this->get_logger(), "Swarm config loaded: %d drones, coh=%.2f sep=%.2f ali=%.2f fro=%.2f",
-                _num_drones, _w_cohesion, _w_separation, _w_alignment, _w_frontier);
+    _swarm_sensor_range = sw["sensor_range"].as<double>(20.0);
+    RCLCPP_INFO(this->get_logger(), "Swarm config loaded: %d drones, coh=%.2f sep=%.2f ali=%.2f fro=%.2f sensor_range=%.1f",
+                _num_drones, _w_cohesion, _w_separation, _w_alignment, _w_frontier, _swarm_sensor_range);
   }
 
   RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");

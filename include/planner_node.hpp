@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <queue>
 #include <opencv2/opencv.hpp>
 #include <random>
 #include <string>
@@ -61,6 +62,8 @@
 #include <ground_system_msgs/msg/swarm_params.hpp>
 #include <ground_system_msgs/msg/swarm_exploration_status.hpp>
 #include <ground_system_msgs/msg/occupancy_grid2_d.hpp>
+#include <ground_system_msgs/msg/swarm_task.hpp>
+#include <ground_system_msgs/msg/swarm_metrics.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -216,22 +219,38 @@ class PlannerNode : public rclcpp::Node {
   // Benchmark helpers
   void publish_benchmark_status(uint8_t status);
 
-  // ===== Frontier-Led Swarming =====
+  // ===== Dynamic Frontier-Led Swarming =====
   void swarm_params_callback(const ground_system_msgs::msg::SwarmParams::SharedPtr msg);
   void neighbor_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg, int neighbor_id);
   void swarm_exploration_loop();
   void update_occupancy_grid();
-  std::vector<Eigen::Vector2d> detect_frontiers();
-  Eigen::Vector2d select_frontier(const std::vector<Eigen::Vector2d>& frontiers);
   Eigen::Vector3d compute_cohesion();
   Eigen::Vector3d compute_separation();
   Eigen::Vector3d compute_alignment();
   Eigen::Vector3d compute_frontier_attraction(const Eigen::Vector2d& target_frontier);
+  Eigen::Vector3d compute_boundary_repulsion();
   void publish_swarm_status();
   void publish_occupancy_grid();
+  void publish_swarm_metrics();
   Eigen::Vector2d world_to_grid(double wx, double wy) const;
   Eigen::Vector2d grid_to_world(int gx, int gy) const;
   bool is_in_grid(int gx, int gy) const;
+
+  // Dynamic frontier region grouping and utility-based selection
+  struct FrontierRegion {
+    Eigen::Vector2d centroid{0, 0};
+    int size{0};
+    double avg_last_visit{0.0};
+    std::vector<Eigen::Vector2d> cells;  // world-coords of all frontier cells in this region
+  };
+  std::vector<FrontierRegion> group_frontier_regions();
+  FrontierRegion select_frontier_region(const std::vector<FrontierRegion>& regions);
+
+  // Task allocation
+  void task_callback(const ground_system_msgs::msg::SwarmTask::SharedPtr msg);
+  void spawn_tasks();
+  void run_task_auction();
+  void execute_task_state();
 
   // Constants
   static constexpr double kPositionJumpTolerance_ = 0.5;
@@ -296,6 +315,14 @@ class PlannerNode : public rclcpp::Node {
   double _max_swarm_speed{1.5};
   double _swarm_altitude{1.5};
 
+  // Frontier utility weights (dynamic frontier-led swarming)
+  double _psi_distance{0.001};
+  double _psi_size{1.0};
+
+  // Swarm sensor range (decoupled from depth planner range)
+  // This is the simulated observation radius for occupancy grid updates
+  double _swarm_sensor_range{10.0};
+
   // Occupancy grid
   double _grid_cell_size{0.5};
   double _grid_width{60.0};
@@ -307,6 +334,10 @@ class PlannerNode : public rclcpp::Node {
   std::vector<uint8_t> _occupancy_grid;  // 0=unknown, 1=free, 2=occupied
   std::mutex _grid_mutex;
   uint32_t _cells_explored{0};
+
+  // Visit tracking (for revisit heatmap and frontier utility)
+  std::vector<uint32_t> _visit_counts;     // Per-cell visit count
+  std::vector<double> _last_visit_time;    // Per-cell last visit timestamp (seconds)
 
   // Neighbor state tracking
   struct NeighborState {
@@ -324,14 +355,51 @@ class PlannerNode : public rclcpp::Node {
   bool _has_frontier{false};
   uint32_t _frontiers_remaining{0};
 
+  // ===== Task Allocation Members =====
+  struct SwarmTaskData {
+    uint32_t id{0};
+    Eigen::Vector3d location{0, 0, 0};
+    double duration{0.0};
+    uint8_t priority{1};
+    uint8_t assigned_drone{0};
+    uint8_t status{0};  // 0=UNASSIGNED, 1=ASSIGNED, 2=IN_PROGRESS, 3=COMPLETED
+    double spawn_time{0.0};
+  };
+  std::vector<SwarmTaskData> _known_tasks;
+  std::mutex _task_mutex;
+  bool _enable_task_allocation{false};
+  double _task_spawn_probability{0.02};
+  double _task_proximity_threshold{2.0};
+  uint32_t _next_task_id{1};
+  std::mt19937 _task_rng;
+
+  // Task execution state
+  uint8_t _task_state{0};  // 0=SWARMING, 1=NAVIGATING_TO_TASK, 2=EXECUTING_TASK
+  uint32_t _current_task_id{0};
+  double _task_exec_start_time{0.0};
+
+  // ===== Metrics Members =====
+  uint32_t _metrics_total_timesteps{0};
+  uint32_t _metrics_agent_collision_count{0};
+  uint32_t _metrics_wall_collision_count{0};
+  uint32_t _setpoint_count{0};
+  uint32_t _last_freq_count{0};
+  double _last_freq_time{0.0};
+  double _collision_radius{1.0};         // Agent-agent collision threshold (m)
+  double _wall_collision_distance{0.5};  // Wall collision threshold (m)
+
   // Swarm pub/sub
   rclcpp::Subscription<ground_system_msgs::msg::SwarmParams>::SharedPtr swarm_params_sub;
   std::vector<rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr> neighbor_odom_subs;
   rclcpp::Publisher<ground_system_msgs::msg::SwarmExplorationStatus>::SharedPtr swarm_status_pub;
   rclcpp::Publisher<ground_system_msgs::msg::OccupancyGrid2D>::SharedPtr occupancy_grid_pub;
+  rclcpp::Publisher<ground_system_msgs::msg::SwarmMetrics>::SharedPtr swarm_metrics_pub;
+  rclcpp::Publisher<ground_system_msgs::msg::SwarmTask>::SharedPtr swarm_task_pub;
+  rclcpp::Subscription<ground_system_msgs::msg::SwarmTask>::SharedPtr swarm_task_sub;
   rclcpp::TimerBase::SharedPtr swarm_exploration_timer_;
   rclcpp::TimerBase::SharedPtr swarm_status_timer_;
   rclcpp::TimerBase::SharedPtr occupancy_pub_timer_;
+  rclcpp::TimerBase::SharedPtr swarm_metrics_timer_;
 };
 
 #endif  // PLANNER_NODE_HPP
