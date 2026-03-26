@@ -196,19 +196,26 @@ bool PlannerNode::loadParameters() {
   // Swarm exploration defaults (overridden at runtime via /swarm_params topic)
   if (planner_config["swarm"]) {
     auto sw = planner_config["swarm"];
-    _num_drones = sw["num_drones"].as<int>(3);
-    _w_cohesion = sw["w_cohesion"].as<double>(0.8);
-    _w_separation = sw["w_separation"].as<double>(1.5);
-    _w_alignment = sw["w_alignment"].as<double>(0.5);
-    _w_frontier = sw["w_frontier"].as<double>(1.2);
-    _w_obstacle = sw["w_obstacle"].as<double>(2.0);
-    _separation_radius = sw["separation_radius"].as<double>(3.0);
-    _neighbor_radius = sw["neighbor_radius"].as<double>(10.0);
-    _max_swarm_speed = sw["max_swarm_speed"].as<double>(1.5);
-    _swarm_altitude = sw["altitude"].as<double>(1.5);
-    _grid_cell_size = sw["cell_size"].as<double>(0.5);
-    _grid_width = sw["map_width"].as<double>(60.0);
-    _grid_height = sw["map_height"].as<double>(60.0);
+    _num_drones = sw["num_drones"].as<int>(15);
+    _w_cohesion = sw["w_cohesion"].as<double>(4.0);
+    _w_separation = sw["w_separation"].as<double>(8.0);
+    _w_alignment = sw["w_alignment"].as<double>(2.0);
+    _w_frontier = sw["w_frontier"].as<double>(0.35);
+    _w_obstacle = sw["w_obstacle"].as<double>(8.0);
+    // Per-rule radii (paper: R_c, R_a, R_s, R_critical)
+    _r_cohesion = sw["r_cohesion"].as<double>(400.0);
+    _r_alignment = sw["r_alignment"].as<double>(70.0);
+    _r_separation = sw["r_separation"].as<double>(200.0);
+    _r_critical = sw["r_critical"].as<double>(15.0);
+    _r_comm = sw["r_comm"].as<double>(300.0);
+    _wall_buffer = sw["wall_buffer"].as<double>(30.0);
+    _max_swarm_speed = sw["max_swarm_speed"].as<double>(12.0);
+    _swarm_altitude = sw["altitude"].as<double>(25.0);
+    _grid_cell_size = sw["cell_size"].as<double>(10.0);
+    _grid_width = sw["map_width"].as<double>(1000.0);
+    _grid_height = sw["map_height"].as<double>(1000.0);
+    _grid_origin_x = sw["map_origin_x"].as<double>(0.0);
+    _grid_origin_y = sw["map_origin_y"].as<double>(0.0);
     _swarm_sensor_range = sw["sensor_range"].as<double>(20.0);
     RCLCPP_INFO(this->get_logger(), "Swarm config loaded: %d drones, coh=%.2f sep=%.2f ali=%.2f fro=%.2f sensor_range=%.1f",
                 _num_drones, _w_cohesion, _w_separation, _w_alignment, _w_frontier, _swarm_sensor_range);

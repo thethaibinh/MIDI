@@ -305,18 +305,28 @@ class PlannerNode : public rclcpp::Node {
   int _num_drones{3};
 
   // Swarm behavior weights (runtime-tunable via /swarm_params)
-  double _w_cohesion{0.8};
-  double _w_separation{1.5};
-  double _w_alignment{0.5};
-  double _w_frontier{1.2};
-  double _w_obstacle{2.0};
-  double _separation_radius{3.0};
-  double _neighbor_radius{10.0};
-  double _max_swarm_speed{1.5};
-  double _swarm_altitude{1.5};
+  double _w_cohesion{4.0};
+  double _w_separation{8.0};
+  double _w_alignment{2.0};
+  double _w_frontier{0.35};
+  double _w_obstacle{8.0};
+
+  // Per-rule radii (paper: R_c, R_a, R_s, R_critical)
+  double _r_cohesion{400.0};
+  double _r_alignment{70.0};
+  double _r_separation{200.0};
+  double _r_critical{15.0};
+
+  // Communication range (paper: R_comm) — gates auction, neighbor counting
+  double _r_comm{300.0};
+
+  // Wall avoidance buffer distance
+  double _wall_buffer{30.0};
+  double _max_swarm_speed{12.0};
+  double _swarm_altitude{25.0};
 
   // Frontier utility weights (dynamic frontier-led swarming)
-  double _psi_distance{0.001};
+  double _psi_distance{0.002}; // Weight for distance to frontier (normalized by max swarm sensor range)
   double _psi_size{1.0};
 
   // Swarm sensor range (decoupled from depth planner range)
@@ -324,13 +334,13 @@ class PlannerNode : public rclcpp::Node {
   double _swarm_sensor_range{10.0};
 
   // Occupancy grid
-  double _grid_cell_size{0.5};
-  double _grid_width{60.0};
-  double _grid_height{60.0};
+  double _grid_cell_size{10.0};  // Size of each grid cell in meters
+  double _grid_width{1000.0};
+  double _grid_height{1000.0};
   int _grid_cols{0};
   int _grid_rows{0};
-  double _grid_origin_x{0.0};
-  double _grid_origin_y{0.0};
+  double _grid_origin_x{0.0};  // Loaded from config (shared by all drones)
+  double _grid_origin_y{0.0};  // Loaded from config (shared by all drones)
   std::vector<uint8_t> _occupancy_grid;  // 0=unknown, 1=free, 2=occupied
   std::mutex _grid_mutex;
   uint32_t _cells_explored{0};

@@ -103,30 +103,24 @@ setpoint_type: "full"            # "position" or "full" control mode, "full" inc
 # Frontier-Led Swarm Exploration defaults
 # These can be overridden at runtime via /swarm_params topic from ground GUI
 swarm:
-  # num_drones: 3
-  # w_cohesion: 0.8         # Pull toward swarm centroid
-  # w_separation: 1.5       # Push away from nearby drones
-  # w_alignment: 0.5        # Match neighbor heading
-  # w_frontier: 1.2         # Attraction toward nearest frontier
-  # w_obstacle: 2.0         # Repulsion from obstacles (via MIDI depth)
-  # separation_radius: 3.0  # Min distance between drones (m)
-  # neighbor_radius: 10.0   # Radius to consider neighbors (m)
-  # max_swarm_speed: 1.5    # Max velocity during swarm exploration (m/s)
-  # altitude: 1.5           # Exploration altitude (m)
-  # cell_size: 0.5          # Occupancy grid cell size (m)
-  # map_width: 60.0         # Map width (m)
-  # map_height: 60.0        # Map height (m)
   num_drones: 15
-  w_cohesion: 0.1         # Pull toward swarm centroid
-  w_separation: 0.2       # Push away from nearby drones
-  w_alignment: 0.0        # Match neighbor heading
-  w_frontier: 1.0         # Attraction toward nearest frontier
-  w_obstacle: 0.2         # Repulsion from obstacles (via MIDI depth)
-  separation_radius: 5.0  # Min distance between drones (m)
-  neighbor_radius: 20.0   # Radius to consider neighbors (m)
-  max_swarm_speed: 2.0    # Max velocity during swarm exploration (m/s)
+  w_cohesion: 4.0         # Pull toward swarm centroid (W_c)
+  w_separation: 8.0       # Push away from nearby drones (W_s)
+  w_alignment: 2.0        # Match neighbor heading (W_a)
+  w_frontier: 0.35         # Frontier vs flocking blend factor w_f ∈ [0,1]
+  w_obstacle: 8.0         # Repulsion from boundaries (W_w)
+  # Per-rule radii (paper: R_c, R_a, R_s, R_critical)
+  r_cohesion: 400.0        # Cohesion radius R_c (m)
+  r_alignment: 70.0       # Alignment radius R_a (m)
+  r_separation: 200.0       # Separation radius R_s (m)
+  r_critical: 15.0         # Emergency separation trigger R_critical (m)
+  r_comm: 300.0            # Communication range R_comm (m) — gates auction, neighbor counting
+  wall_buffer: 10.0       # Boundary repulsion buffer distance (m)
+  max_swarm_speed: 12.0    # Max velocity during swarm exploration (m/s)
   altitude: 15.0           # Exploration altitude (m)
   cell_size: 5.0          # Occupancy grid cell size (m)
-  map_width: 100.0         # Map width (m)
-  map_height: 100.0        # Map height (m)
+  map_width: 1000.0        # Map width (m)
+  map_height: 1000.0       # Map height (m)
+  map_origin_x: 0.0       # World X of grid cell (0,0) — shared by all drones
+  map_origin_y: 0.0       # World Y of grid cell (0,0) — shared by all drones
   sensor_range: 20.0       # Observation radius (m) — downward-camera disc footprint

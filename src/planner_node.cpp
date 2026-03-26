@@ -248,9 +248,8 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     // Initialize occupancy grid
     _grid_cols = static_cast<int>(_grid_width / _grid_cell_size);
     _grid_rows = static_cast<int>(_grid_height / _grid_cell_size);
-    // Center grid on current position
-    _grid_origin_x = _state.pose.position.x - _grid_width / 2.0;
-    _grid_origin_y = _state.pose.position.y - _grid_height / 2.0;
+    // Grid origin is a fixed config value shared by all drones
+    // (loaded from YAML map_origin_x / map_origin_y, default 0,0)
     {
       const std::lock_guard<std::mutex> lock(_grid_mutex);
       _occupancy_grid.assign(_grid_cols * _grid_rows, 0);  // All unknown
@@ -1744,8 +1743,13 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
   _w_alignment = msg->w_alignment;
   _w_frontier = msg->w_frontier;
   _w_obstacle = msg->w_obstacle;
-  _separation_radius = msg->separation_radius;
-  _neighbor_radius = msg->neighbor_radius;
+  // Per-rule radii (paper: R_c, R_a, R_s, R_critical)
+  if (msg->r_cohesion > 0.0) _r_cohesion = msg->r_cohesion;
+  if (msg->r_alignment > 0.0) _r_alignment = msg->r_alignment;
+  if (msg->r_separation > 0.0) _r_separation = msg->r_separation;
+  if (msg->r_critical > 0.0) _r_critical = msg->r_critical;
+  if (msg->r_comm > 0.0) _r_comm = msg->r_comm;
+  if (msg->wall_buffer > 0.0) _wall_buffer = msg->wall_buffer;
   _max_swarm_speed = msg->max_swarm_speed;
   _swarm_altitude = msg->altitude;
 
@@ -1761,19 +1765,18 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
   if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
     if (std::abs(msg->cell_size - _grid_cell_size) > 0.001 ||
         std::abs(msg->map_width - _grid_width) > 0.1 ||
-        std::abs(msg->map_height - _grid_height) > 0.1) {
+        std::abs(msg->map_height - _grid_height) > 0.1 ||
+        std::abs(msg->map_origin_x - _grid_origin_x) > 0.1 ||
+        std::abs(msg->map_origin_y - _grid_origin_y) > 0.1) {
       RCLCPP_INFO(this->get_logger(), "[SWARM] Grid config changed, rebuilding grid");
       _grid_cell_size = msg->cell_size;
       _grid_width = msg->map_width;
       _grid_height = msg->map_height;
+      _grid_origin_x = msg->map_origin_x;
+      _grid_origin_y = msg->map_origin_y;
       _grid_cols = static_cast<int>(_grid_width / _grid_cell_size);
       _grid_rows = static_cast<int>(_grid_height / _grid_cell_size);
-      // Re-center grid on current drone position
-      {
-        const std::lock_guard<std::mutex> slock(state_mutex_);
-        _grid_origin_x = _state.pose.position.x - _grid_width / 2.0;
-        _grid_origin_y = _state.pose.position.y - _grid_height / 2.0;
-      }
+      // Grid origin updated from GUI message
       const std::lock_guard<std::mutex> lock(_grid_mutex);
       _occupancy_grid.assign(_grid_cols * _grid_rows, 0);
       _visit_counts.assign(_grid_cols * _grid_rows, 0);
@@ -2019,6 +2022,8 @@ PlannerNode::FrontierRegion PlannerNode::select_frontier_region(
 }
 
 Eigen::Vector3d PlannerNode::compute_cohesion() {
+  // Paper: vc = normalized(avg_neighbor_pos - current_pos)
+  // Neighbors within R_cohesion
   Eigen::Vector3d centroid(0, 0, 0);
   int count = 0;
   Eigen::Vector3d my_pos;
@@ -2033,7 +2038,7 @@ Eigen::Vector3d PlannerNode::compute_cohesion() {
       double age = (this->now() - ns.last_update).seconds();
       if (age > 2.0) continue;
       double dist = (ns.position - my_pos).norm();
-      if (dist > _neighbor_radius) continue;
+      if (dist > _r_cohesion) continue;
       centroid += ns.position;
       count++;
     }
@@ -2047,6 +2052,10 @@ Eigen::Vector3d PlannerNode::compute_cohesion() {
 }
 
 Eigen::Vector3d PlannerNode::compute_separation() {
+  // Paper: for each neighbor within R_separation:
+  //   repulsion_strength = (R_separation - distance) / R_separation
+  //   sum += (current_pos - neighbor_pos) / distance * repulsion_strength
+  // Result normalized to unit vector.
   Eigen::Vector3d repulsion(0, 0, 0);
   Eigen::Vector3d my_pos;
   {
@@ -2061,8 +2070,9 @@ Eigen::Vector3d PlannerNode::compute_separation() {
       if (age > 2.0) continue;
       Eigen::Vector3d diff = my_pos - ns.position;
       double dist = diff.norm();
-      if (dist < 0.01 || dist > _separation_radius) continue;
-      repulsion += diff / (dist * dist);
+      if (dist < 0.01 || dist > _r_separation) continue;
+      double strength = (_r_separation - dist) / _r_separation;  // Linear falloff [0,1]
+      repulsion += (diff / dist) * strength;
     }
   }
   double mag = repulsion.norm();
@@ -2071,6 +2081,8 @@ Eigen::Vector3d PlannerNode::compute_separation() {
 }
 
 Eigen::Vector3d PlannerNode::compute_alignment() {
+  // Paper: va = normalized(average_neighbor_velocities)
+  // Neighbors within R_alignment
   Eigen::Vector3d avg_vel(0, 0, 0);
   int count = 0;
   Eigen::Vector3d my_pos;
@@ -2085,7 +2097,7 @@ Eigen::Vector3d PlannerNode::compute_alignment() {
       double age = (this->now() - ns.last_update).seconds();
       if (age > 2.0) continue;
       double dist = (ns.position - my_pos).norm();
-      if (dist > _neighbor_radius) continue;
+      if (dist > _r_alignment) continue;
       avg_vel += ns.velocity;
       count++;
     }
@@ -2111,7 +2123,10 @@ Eigen::Vector3d PlannerNode::compute_frontier_attraction(const Eigen::Vector2d& 
 }
 
 Eigen::Vector3d PlannerNode::compute_boundary_repulsion() {
-  double margin = _separation_radius;
+  // Paper (calculateWallAvoidance.m):
+  //  For each dimension: if pos < min + wall_buffer → repel = (min+buffer-pos)/buffer
+  //                      if pos > max - wall_buffer → repel = -(pos-(max-buffer))/buffer
+  //  Result normalized to unit vector.
   Eigen::Vector3d my_pos;
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -2123,19 +2138,24 @@ Eigen::Vector3d PlannerNode::compute_boundary_repulsion() {
   double min_y = _grid_origin_y;
   double max_y = _grid_origin_y + _grid_height;
 
-  Eigen::Vector3d repulsion(0.0, 0.0, 0.0);
+  Eigen::Vector3d vw(0.0, 0.0, 0.0);
 
-  double dx_min = my_pos.x() - min_x;
-  double dx_max = max_x - my_pos.x();
-  double dy_min = my_pos.y() - min_y;
-  double dy_max = max_y - my_pos.y();
+  // X dimension
+  if (my_pos.x() < min_x + _wall_buffer)
+    vw.x() = (min_x + _wall_buffer - my_pos.x()) / _wall_buffer;
+  else if (my_pos.x() > max_x - _wall_buffer)
+    vw.x() = -(my_pos.x() - (max_x - _wall_buffer)) / _wall_buffer;
 
-  if (dx_min < margin && dx_min > 0.01) repulsion.x() += (margin - dx_min) / margin;
-  if (dx_max < margin && dx_max > 0.01) repulsion.x() -= (margin - dx_max) / margin;
-  if (dy_min < margin && dy_min > 0.01) repulsion.y() += (margin - dy_min) / margin;
-  if (dy_max < margin && dy_max > 0.01) repulsion.y() -= (margin - dy_max) / margin;
+  // Y dimension
+  if (my_pos.y() < min_y + _wall_buffer)
+    vw.y() = (min_y + _wall_buffer - my_pos.y()) / _wall_buffer;
+  else if (my_pos.y() > max_y - _wall_buffer)
+    vw.y() = -(my_pos.y() - (max_y - _wall_buffer)) / _wall_buffer;
 
-  return repulsion;
+  // Normalize to unit vector (paper does this)
+  double mag = vw.norm();
+  if (mag > 0.01) vw = vw / mag;
+  return vw;
 }
 
 // =============================================================================
@@ -2193,10 +2213,10 @@ void PlannerNode::spawn_tasks() {
   if (prob_dist(_task_rng) > _task_spawn_probability) return;
 
   // Random location within grid bounds
-  std::uniform_real_distribution<double> x_dist(_grid_origin_x + _separation_radius,
-                                                 _grid_origin_x + _grid_width - _separation_radius);
-  std::uniform_real_distribution<double> y_dist(_grid_origin_y + _separation_radius,
-                                                 _grid_origin_y + _grid_height - _separation_radius);
+  std::uniform_real_distribution<double> x_dist(_grid_origin_x + _r_separation,
+                                                 _grid_origin_x + _grid_width - _r_separation);
+  std::uniform_real_distribution<double> y_dist(_grid_origin_y + _r_separation,
+                                                 _grid_origin_y + _grid_height - _r_separation);
   std::uniform_real_distribution<double> dur_dist(10.0, 60.0);
   std::uniform_int_distribution<int> pri_dist(1, 5);
 
@@ -2251,7 +2271,7 @@ void PlannerNode::run_task_auction() {
   // Each drone independently computes this; drone with lowest ID among highest bidders wins
   // For simplicity: assign if we have a positive bid
   if (best_bid > 0) {
-    // Check if another drone is closer
+    // Check if another drone within R_comm is closer (paper: auction bid propagation)
     bool another_closer = false;
     for (const auto& t : _known_tasks) {
       if (t.id != best_task_id) continue;
@@ -2260,6 +2280,9 @@ void PlannerNode::run_task_auction() {
         if (!ns.valid) continue;
         double age = (this->now() - ns.last_update).seconds();
         if (age > 2.0) continue;
+        // Only consider neighbors within communication range R_comm
+        double neighbor_dist_to_me = (ns.position - my_pos).norm();
+        if (neighbor_dist_to_me > _r_comm) continue;
         double n_dist = (t.location - ns.position).norm();
         double my_dist = (t.location - my_pos).norm();
         if (n_dist < my_dist || (std::abs(n_dist - my_dist) < 0.1 && nid < _drone_id)) {
@@ -2428,16 +2451,58 @@ void PlannerNode::swarm_exploration_loop() {
       "[SWARM] No frontiers remaining — exploration complete!");
   }
 
-  // 6. Compute forces based on current task state
-  Eigen::Vector3d cohesion_force = compute_cohesion();
-  Eigen::Vector3d separation_force = compute_separation();
-  Eigen::Vector3d alignment_force = compute_alignment();
-  Eigen::Vector3d boundary_force = compute_boundary_repulsion();
-  Eigen::Vector3d frontier_force(0, 0, 0);
+  // 6. Compute forces based on paper's decision logic (main.m lines 430-475)
+  //
+  // Paper algorithm:
+  //   if is_critical (any neighbor < R_critical):
+  //     v_flock = W_s*vs + W_w*vw;  v_frontier = [0,0,0]
+  //   else if swarming:
+  //     v_flock = W_c*vc + W_a*va + W_s*vs + W_w*vw
+  //     v_frontier = calculateFrontierVelocity(...)    (already scaled by w_f)
+  //   else if on_task:
+  //     v_flock = W_s*vs + W_w*vw;  v_frontier = [0,0,0]
+  //     (updateRobotState handles task navigation separately)
+  //
+  // Then: v_fused = w_f * v_frontier + (1 - w_f) * v_flock
+  //       (where w_f ∈ [0,1] is the frontier blend weight)
 
-  if (_task_state == 1 && _current_task_id > 0) {
-    // NAVIGATING_TO_TASK: steer toward task location instead of frontier
-    Eigen::Vector3d task_loc;
+  // Check R_critical emergency condition
+  bool is_critical = false;
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    Eigen::Vector3d my_pos_cr;
+    {
+      const std::lock_guard<std::mutex> slock(state_mutex_);
+      my_pos_cr = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+    }
+    for (auto& [id, ns] : _neighbor_states) {
+      if (!ns.valid) continue;
+      double age = (this->now() - ns.last_update).seconds();
+      if (age > 2.0) continue;
+      double dist = (ns.position - my_pos_cr).norm();
+      if (dist < _r_critical) {
+        is_critical = true;
+        break;
+      }
+    }
+  }
+
+  Eigen::Vector3d v_flock(0, 0, 0);
+  Eigen::Vector3d v_frontier_vec(0, 0, 0);
+
+  if (is_critical) {
+    // EMERGENCY: separation + wall avoidance only, no frontier
+    Eigen::Vector3d separation_force = compute_separation();
+    Eigen::Vector3d boundary_force = compute_boundary_repulsion();
+    v_flock = _w_separation * separation_force + _w_obstacle * boundary_force;
+    v_frontier_vec = Eigen::Vector3d(0, 0, 0);
+  } else if (_task_state == 1 && _current_task_id > 0) {
+    // ON_TASK / NAVIGATING: v_flock = W_s*vs + W_w*vw, navigate to task
+    Eigen::Vector3d separation_force = compute_separation();
+    Eigen::Vector3d boundary_force = compute_boundary_repulsion();
+    v_flock = _w_separation * separation_force + _w_obstacle * boundary_force;
+    // Task navigation handled by updateRobotState-like logic: steer toward task
+    Eigen::Vector3d task_loc(0, 0, 0);
     {
       const std::lock_guard<std::mutex> lock(_task_mutex);
       for (const auto& t : _known_tasks) {
@@ -2445,33 +2510,63 @@ void PlannerNode::swarm_exploration_loop() {
       }
     }
     Eigen::Vector2d task_2d(task_loc.x(), task_loc.y());
-    frontier_force = compute_frontier_attraction(task_2d);
+    v_frontier_vec = compute_frontier_attraction(task_2d);
+    // For on_task, w_f blending still applies with task as "frontier target"
   } else if (_task_state == 2) {
-    // EXECUTING_TASK: hover at current position (no frontier/task force)
-    frontier_force = Eigen::Vector3d(0, 0, 0);
-  } else if (_has_frontier) {
-    // SWARMING: normal frontier attraction
-    frontier_force = compute_frontier_attraction(_assigned_frontier);
+    // EXECUTING_TASK: hover at current position
+    Eigen::Vector3d separation_force = compute_separation();
+    Eigen::Vector3d boundary_force = compute_boundary_repulsion();
+    v_flock = _w_separation * separation_force + _w_obstacle * boundary_force;
+    v_frontier_vec = Eigen::Vector3d(0, 0, 0);
+  } else {
+    // SWARMING: full Reynolds flocking + frontier
+    Eigen::Vector3d cohesion_force = compute_cohesion();
+    Eigen::Vector3d separation_force = compute_separation();
+    Eigen::Vector3d alignment_force = compute_alignment();
+    Eigen::Vector3d boundary_force = compute_boundary_repulsion();
+    v_flock = _w_cohesion * cohesion_force +
+              _w_alignment * alignment_force +
+              _w_separation * separation_force +
+              _w_obstacle * boundary_force;
+
+    if (_has_frontier) {
+      v_frontier_vec = compute_frontier_attraction(_assigned_frontier);
+      // Paper: v_frontier already scaled by w_f inside calculateFrontierVelocity
+      // We keep it as unit vector here and apply w_f in the fusion below
+    }
   }
 
-  // 7. Blend forces
-  Eigen::Vector3d combined_velocity =
-    _w_cohesion * cohesion_force +
-    _w_separation * separation_force +
-    _w_alignment * alignment_force +
-    _w_frontier * frontier_force +
-    _w_obstacle * boundary_force;
+  // 7. Velocity fusion (paper: updateRobotState.m)
+  //    v_fused = w_f * v_frontier + (1 - w_f) * v_flock
+  //    where w_f ∈ [0,1] controls frontier vs flocking priority
+  double wf = std::clamp(_w_frontier, 0.0, 1.0);
+  Eigen::Vector3d combined_velocity;
+  if (is_critical || _task_state == 2) {
+    // Emergency or executing task: no blending, just v_flock
+    combined_velocity = v_flock;
+  } else {
+    // Normalize v_flock and v_frontier before blending (paper normalizes each)
+    Eigen::Vector3d v_flock_norm = v_flock;
+    double flock_mag = v_flock_norm.norm();
+    if (flock_mag > 0.01) v_flock_norm = v_flock_norm / flock_mag;
 
-  // Enforce altitude
+    Eigen::Vector3d v_frontier_norm = v_frontier_vec;
+    double frontier_mag = v_frontier_norm.norm();
+    if (frontier_mag > 0.01) v_frontier_norm = v_frontier_norm / frontier_mag;
+
+    combined_velocity = wf * v_frontier_norm + (1.0 - wf) * v_flock_norm;
+  }
+
+  // Scale to max speed
+  double cv_mag = combined_velocity.norm();
+  if (cv_mag > 0.01) {
+    combined_velocity = (combined_velocity / cv_mag) * _max_swarm_speed;
+  }
+
+  // Enforce altitude (2D/planar mode: Z velocity = altitude correction only)
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
-  }
-
-  // Clamp speed
-  double speed = combined_velocity.head<2>().norm();
-  if (speed > _max_swarm_speed) {
-    combined_velocity.head<2>() *= _max_swarm_speed / speed;
   }
 
   // If executing task and arrived, reduce horizontal velocity to hover
@@ -2628,7 +2723,7 @@ void PlannerNode::publish_swarm_status() {
       double age = (this->now() - ns.last_update).seconds();
       if (age > 2.0) continue;
       double dist = (ns.position - my_pos).norm();
-      if (dist <= _neighbor_radius) {
+      if (dist <= _r_comm) {
         num_neighbors++;
         nearest_dist = std::min(nearest_dist, dist);
       }
