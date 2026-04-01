@@ -273,6 +273,8 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     _metrics_total_timesteps = 0;
     _metrics_agent_collision_count = 0;
     _metrics_wall_collision_count = 0;
+    _was_in_agent_collision = false;
+    _was_in_wall_collision = false;
 
     _home_in_world_frame = _state.pose.position;
 
@@ -612,6 +614,8 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _frontiers_remaining = 0;
   _task_state = 0;
   _current_task_id = 0;
+  _current_yaw = 0.0;
+  _current_pitch = 0.0;
   if (swarm_exploration_timer_) { swarm_exploration_timer_->cancel(); swarm_exploration_timer_.reset(); }
   if (swarm_status_timer_) { swarm_status_timer_->cancel(); swarm_status_timer_.reset(); }
   if (occupancy_pub_timer_) { occupancy_pub_timer_->cancel(); occupancy_pub_timer_.reset(); }
@@ -630,6 +634,8 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _metrics_total_timesteps = 0;
   _metrics_agent_collision_count = 0;
   _metrics_wall_collision_count = 0;
+  _was_in_agent_collision = false;
+  _was_in_wall_collision = false;
 }
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
@@ -1762,6 +1768,18 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
   if (msg->task_spawn_probability > 0.0) _task_spawn_probability = msg->task_spawn_probability;
   if (msg->task_proximity_threshold > 0.0) _task_proximity_threshold = msg->task_proximity_threshold;
 
+  // Motion mode (0=2D, 1=3D)
+  uint8_t old_mode = _motion_mode;
+  _motion_mode = msg->motion_mode;
+  if (_motion_mode != old_mode) {
+    RCLCPP_INFO(this->get_logger(), "[SWARM] Motion mode changed to %s",
+                _motion_mode == 1 ? "3D" : "2D");
+    if (_motion_mode == 0) {
+      // Switching to 2D: reset pitch to zero
+      _current_pitch = 0.0;
+    }
+  }
+
   if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
     if (std::abs(msg->cell_size - _grid_cell_size) > 0.001 ||
         std::abs(msg->map_width - _grid_width) > 0.1 ||
@@ -2152,6 +2170,16 @@ Eigen::Vector3d PlannerNode::compute_boundary_repulsion() {
   else if (my_pos.y() > max_y - _wall_buffer)
     vw.y() = -(my_pos.y() - (max_y - _wall_buffer)) / _wall_buffer;
 
+  // Z dimension (3D mode only — repel from ceiling/floor geofence)
+  if (_motion_mode == 1) {
+    double min_z = _fence_min_z;
+    double max_z = _fence_max_z;
+    if (my_pos.z() < min_z + _wall_buffer)
+      vw.z() = (min_z + _wall_buffer - my_pos.z()) / _wall_buffer;
+    else if (my_pos.z() > max_z - _wall_buffer)
+      vw.z() = -(my_pos.z() - (max_z - _wall_buffer)) / _wall_buffer;
+  }
+
   // Normalize to unit vector (paper does this)
   double mag = vw.norm();
   if (mag > 0.01) vw = vw / mag;
@@ -2163,33 +2191,41 @@ Eigen::Vector3d PlannerNode::compute_boundary_repulsion() {
 // =============================================================================
 
 void PlannerNode::task_callback(const ground_system_msgs::msg::SwarmTask::SharedPtr msg) {
-  const std::lock_guard<std::mutex> lock(_task_mutex);
+  bool should_auction = false;
+  {
+    const std::lock_guard<std::mutex> lock(_task_mutex);
 
-  // Find existing task or add new one
-  for (auto& t : _known_tasks) {
-    if (t.id == msg->task_id) {
-      t.assigned_drone = msg->assigned_drone_id;
-      t.status = msg->status;
-      return;
+    // Find existing task or add new one
+    for (auto& t : _known_tasks) {
+      if (t.id == msg->task_id) {
+        t.assigned_drone = msg->assigned_drone_id;
+        t.status = msg->status;
+        return;
+      }
+    }
+
+    // New task
+    SwarmTaskData task;
+    task.id = msg->task_id;
+    task.location = Eigen::Vector3d(msg->location.x, msg->location.y, msg->location.z);
+    task.duration = msg->duration;
+    task.priority = msg->priority;
+    task.assigned_drone = msg->assigned_drone_id;
+    task.status = msg->status;
+    task.spawn_time = msg->spawn_time;
+    _known_tasks.push_back(task);
+
+    RCLCPP_INFO(this->get_logger(), "[TASK] Received task %u at (%.1f,%.1f) dur=%.0fs pri=%d status=%d",
+                task.id, task.location.x(), task.location.y(), task.duration, task.priority, task.status);
+
+    // If unassigned and we're idle (swarming), try to bid
+    if (task.status == 0 && _task_state == 0) {
+      should_auction = true;
     }
   }
-
-  // New task
-  SwarmTaskData task;
-  task.id = msg->task_id;
-  task.location = Eigen::Vector3d(msg->location.x, msg->location.y, msg->location.z);
-  task.duration = msg->duration;
-  task.priority = msg->priority;
-  task.assigned_drone = msg->assigned_drone_id;
-  task.status = msg->status;
-  task.spawn_time = msg->spawn_time;
-  _known_tasks.push_back(task);
-
-  RCLCPP_INFO(this->get_logger(), "[TASK] Received task %u at (%.1f,%.1f) dur=%.0fs pri=%d status=%d",
-              task.id, task.location.x(), task.location.y(), task.duration, task.priority, task.status);
-
-  // If unassigned and we're idle (swarming), try to bid
-  if (task.status == 0 && _task_state == 0) {
+  // Run auction OUTSIDE the lock to avoid deadlock
+  // (run_task_auction() acquires _task_mutex internally)
+  if (should_auction) {
     run_task_auction();
   }
 }
@@ -2249,6 +2285,7 @@ void PlannerNode::run_task_auction() {
   }
 
   // Find best unassigned task for this drone
+  // Bid = priority / (1 + distance) — works across all map scales
   double best_bid = -std::numeric_limits<double>::max();
   uint32_t best_task_id = 0;
 
@@ -2256,8 +2293,7 @@ void PlannerNode::run_task_auction() {
     if (t.status != 0) continue;  // Only bid on unassigned tasks
 
     double travel_dist = (t.location - my_pos).norm();
-    double shared_reward = 100.0 * t.priority;
-    double bid = shared_reward - travel_dist;
+    double bid = static_cast<double>(t.priority) / (1.0 + travel_dist);
 
     if (bid > best_bid) {
       best_bid = bid;
@@ -2267,9 +2303,8 @@ void PlannerNode::run_task_auction() {
 
   if (best_task_id == 0) return;
 
-  // Simple winner determination: bid based on priority - distance, tie-break by lower drone_id
-  // Each drone independently computes this; drone with lowest ID among highest bidders wins
-  // For simplicity: assign if we have a positive bid
+  // Winner determination: each drone bids independently.
+  // Assign if no closer neighbor within R_comm exists (tie-break by lower drone_id).
   if (best_bid > 0) {
     // Check if another drone within R_comm is closer (paper: auction bid propagation)
     bool another_closer = false;
@@ -2563,10 +2598,47 @@ void PlannerNode::swarm_exploration_loop() {
     combined_velocity = (combined_velocity / cv_mag) * _max_swarm_speed;
   }
 
-  // Enforce altitude (2D/planar mode: Z velocity = altitude correction only)
-  {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
-    combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
+  // Motion mode branching: 2D (fixed altitude) vs 3D (heading-rate-limited)
+  if (_motion_mode == 0) {
+    // ---- 2D MODE: Enforce altitude with proportional controller ----
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
+    }
+  } else {
+    // ---- 3D MODE: Heading-rate-limited motion (paper Section 3.1.4) ----
+    // Desired heading from velocity vector
+    double ux = combined_velocity.x();
+    double uy = combined_velocity.y();
+    double uz = combined_velocity.z();
+    double horiz_mag = std::sqrt(ux * ux + uy * uy);
+
+    double desired_yaw = std::atan2(uy, ux);
+    double desired_pitch = std::atan2(uz, horiz_mag + 1e-6);
+
+    // Wrap angle difference to [-pi, pi]
+    auto wrap_angle = [](double a) -> double {
+      while (a > M_PI) a -= 2.0 * M_PI;
+      while (a < -M_PI) a += 2.0 * M_PI;
+      return a;
+    };
+
+    // Proportional controller with saturation (paper Eq. 28-29)
+    double dt_loop = 0.1;  // swarm loop runs at 10 Hz
+    double yaw_error = wrap_angle(desired_yaw - _current_yaw);
+    double yaw_rate = std::clamp(_heading_gain * yaw_error, -_max_yaw_rate, _max_yaw_rate);
+    _current_yaw += yaw_rate * dt_loop;
+    _current_yaw = wrap_angle(_current_yaw);
+
+    double pitch_error = wrap_angle(desired_pitch - _current_pitch);
+    double pitch_rate = std::clamp(_heading_gain * pitch_error, -_max_pitch_rate, _max_pitch_rate);
+    _current_pitch += pitch_rate * dt_loop;
+    _current_pitch = std::clamp(_current_pitch, -M_PI / 4.0, M_PI / 4.0);  // Limit to ±45°
+
+    // Reconstruct velocity from tracked heading (paper Eq. 30)
+    combined_velocity.x() = _max_swarm_speed * std::cos(_current_yaw) * std::cos(_current_pitch);
+    combined_velocity.y() = _max_swarm_speed * std::sin(_current_yaw) * std::cos(_current_pitch);
+    combined_velocity.z() = _max_swarm_speed * std::sin(_current_pitch);
   }
 
   // If executing task and arrived, reduce horizontal velocity to hover
@@ -2587,7 +2659,12 @@ void PlannerNode::swarm_exploration_loop() {
   target_pos.y() = std::clamp(target_pos.y(), _fence_min_y, _fence_max_y);
   target_pos.z() = std::clamp(target_pos.z(), _fence_min_z, _fence_max_z);
 
-  _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
+  // Heading: use rate-limited yaw in 3D mode, instantaneous in 2D
+  if (_motion_mode == 1) {
+    _goal_heading = _current_yaw;
+  } else {
+    _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
+  }
 
   // 9. Publish velocity setpoint (paper's algorithm outputs velocity directly)
   _setpoint_count++;
@@ -2602,7 +2679,7 @@ void PlannerNode::swarm_exploration_loop() {
     public_ref_pos(swarm_ref);
   }
 
-  // 10. Collision detection for metrics
+  // 10. Collision detection for metrics (edge-detect: count transitions into zone)
   {
     const std::lock_guard<std::mutex> lock(_neighbor_mutex);
     bool agent_collision = false;
@@ -2616,7 +2693,8 @@ void PlannerNode::swarm_exploration_loop() {
         break;
       }
     }
-    if (agent_collision) _metrics_agent_collision_count++;
+    if (agent_collision && !_was_in_agent_collision) _metrics_agent_collision_count++;
+    _was_in_agent_collision = agent_collision;
   }
   {
     double min_x = _grid_origin_x;
@@ -2628,7 +2706,8 @@ void PlannerNode::swarm_exploration_loop() {
       (max_x - my_pos.x() < _wall_collision_distance) ||
       (my_pos.y() - min_y < _wall_collision_distance) ||
       (max_y - my_pos.y() < _wall_collision_distance);
-    if (wall_collision) _metrics_wall_collision_count++;
+    if (wall_collision && !_was_in_wall_collision) _metrics_wall_collision_count++;
+    _was_in_wall_collision = wall_collision;
   }
 
   // Compute setpoint frequency every 2 seconds

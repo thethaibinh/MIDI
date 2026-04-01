@@ -303,6 +303,14 @@ class PlannerNode : public rclcpp::Node {
   bool _swarm_mode{false};
   int _drone_id{1};
   int _num_drones{3};
+  uint8_t _motion_mode{0};  // 0=2D planar, 1=3D boid swarming
+
+  // Heading-rate-limited motion (3D mode, paper Section 3.1.4)
+  double _current_yaw{0.0};     // Current heading azimuth (rad)
+  double _current_pitch{0.0};   // Current heading elevation (rad)
+  double _max_yaw_rate{1.5};    // Maximum yaw rate (rad/s), paper: theta_dot_max
+  double _max_pitch_rate{0.8};  // Maximum pitch rate (rad/s), paper: phi_dot_max
+  double _heading_gain{2.0};    // Proportional gain for heading tracking, paper: k_omega
 
   // Swarm behavior weights (runtime-tunable via /swarm_params)
   double _w_cohesion{4.0};
@@ -379,7 +387,7 @@ class PlannerNode : public rclcpp::Node {
   std::mutex _task_mutex;
   bool _enable_task_allocation{false};
   double _task_spawn_probability{0.02};
-  double _task_proximity_threshold{2.0};
+  double _task_proximity_threshold{20.0};
   uint32_t _next_task_id{1};
   std::mt19937 _task_rng;
 
@@ -392,6 +400,8 @@ class PlannerNode : public rclcpp::Node {
   uint32_t _metrics_total_timesteps{0};
   uint32_t _metrics_agent_collision_count{0};
   uint32_t _metrics_wall_collision_count{0};
+  bool _was_in_agent_collision{false};   // Edge-detect: true while inside collision zone
+  bool _was_in_wall_collision{false};    // Edge-detect: true while inside wall zone
   uint32_t _setpoint_count{0};
   uint32_t _last_freq_count{0};
   double _last_freq_time{0.0};
