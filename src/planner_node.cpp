@@ -323,6 +323,13 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
       "/swarm_tasks", 10,
       std::bind(&PlannerNode::task_callback, this, std::placeholders::_1));
 
+    // Subscribe to neighbor occupancy grids for map merging (MATLAB: mergeMaps.m)
+    // All drones publish to /occupancy_grid at 1 Hz; we merge from neighbors
+    // within communication range, matching MATLAB's every-50-timestep merge.
+    neighbor_grid_sub = this->create_subscription<ground_system_msgs::msg::OccupancyGrid2D>(
+      "/occupancy_grid", 10,
+      std::bind(&PlannerNode::neighbor_grid_callback, this, std::placeholders::_1));
+
     // Metrics publisher
     swarm_metrics_pub = this->create_publisher<ground_system_msgs::msg::SwarmMetrics>("/swarm_metrics", 10);
 
@@ -1841,7 +1848,6 @@ bool PlannerNode::is_in_grid(int gx, int gy) const {
 void PlannerNode::update_occupancy_grid() {
   const std::lock_guard<std::mutex> lock(_grid_mutex);
 
-  double sensor_range = _swarm_sensor_range;
   Eigen::Vector3d pos;
   double yaw;
   {
@@ -1853,51 +1859,39 @@ void PlannerNode::update_occupancy_grid() {
   }
 
   double current_time = this->now().seconds();
-  // Downward-camera model: mark all grid cells within sensor_range of
-  // the drone's (x,y) as explored — equivalent to a ground robot with
-  // a circular observation footprint (2D disc).
-  int r_cells = static_cast<int>(std::ceil(sensor_range / _grid_cell_size));
+  // Single-cell observation model (matches MATLAB updateRobotLocalMap.m):
+  // Mark only the grid cell the drone is currently in as explored.
+  // Coverage propagation across the swarm happens via map merging.
   Eigen::Vector2d my_gc = world_to_grid(pos.x(), pos.y());
   int cx = static_cast<int>(my_gc.x());
   int cy = static_cast<int>(my_gc.y());
-  double range_sq = sensor_range * sensor_range;
 
-  // One-time diagnostic to verify disc model is compiled and active
+  // One-time diagnostic to verify single-cell model is compiled and active
   static bool diag_printed = false;
   if (!diag_printed) {
     RCLCPP_WARN(this->get_logger(),
-      "[DISC-MODEL] sensor_range=%.1f cell_size=%.1f r_cells=%d grid=%dx%d drone=%d pos=(%.1f,%.1f) cell=(%d,%d)",
-      sensor_range, _grid_cell_size, r_cells, _grid_cols, _grid_rows,
+      "[SINGLE-CELL] cell_size=%.1f grid=%dx%d drone=%d pos=(%.1f,%.1f) cell=(%d,%d)",
+      _grid_cell_size, _grid_cols, _grid_rows,
       _drone_id, pos.x(), pos.y(), cx, cy);
     diag_printed = true;
   }
 
   int new_cells = 0;
-  for (int dy = -r_cells; dy <= r_cells; ++dy) {
-    for (int dx = -r_cells; dx <= r_cells; ++dx) {
-      int gx = cx + dx;
-      int gy = cy + dy;
-      if (!is_in_grid(gx, gy)) continue;
-      // Check actual world distance (cell center to drone position)
-      Eigen::Vector2d cell_world = grid_to_world(gx, gy);
-      double dist_sq = (cell_world.x() - pos.x()) * (cell_world.x() - pos.x()) +
-                       (cell_world.y() - pos.y()) * (cell_world.y() - pos.y());
-      if (dist_sq > range_sq) continue;
-      int idx = gy * _grid_cols + gx;
-      if (_occupancy_grid[idx] == 0) {
-        _occupancy_grid[idx] = 1;  // free/explored
-        _cells_explored++;
-        new_cells++;
-      }
-      _visit_counts[idx]++;
-      _last_visit_time[idx] = current_time;
+  if (is_in_grid(cx, cy)) {
+    int idx = cy * _grid_cols + cx;
+    if (_occupancy_grid[idx] == 0) {
+      _occupancy_grid[idx] = 1;  // free/explored
+      _cells_explored++;
+      new_cells++;
     }
+    _visit_counts[idx]++;
+    _last_visit_time[idx] = current_time;
   }
 
   // Periodic diagnostic: log when new cells are explored
   if (new_cells > 0) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-      "[DISC-MODEL] drone=%d explored %d new cells (total=%d/%d) pos=(%.1f,%.1f)",
+      "[SINGLE-CELL] drone=%d explored %d new cells (total=%d/%d) pos=(%.1f,%.1f)",
       _drone_id, new_cells, _cells_explored, _grid_cols * _grid_rows, pos.x(), pos.y());
   }
 }
@@ -2639,6 +2633,16 @@ void PlannerNode::swarm_exploration_loop() {
     combined_velocity.x() = _max_swarm_speed * std::cos(_current_yaw) * std::cos(_current_pitch);
     combined_velocity.y() = _max_swarm_speed * std::sin(_current_yaw) * std::cos(_current_pitch);
     combined_velocity.z() = _max_swarm_speed * std::sin(_current_pitch);
+
+    // Altitude floor recovery: if below fence_min_z, override Z velocity to climb back
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      double cur_z = _state.pose.position.z;
+      if (cur_z < _fence_min_z + _wall_buffer) {
+        double recovery_vz = (_fence_min_z + _wall_buffer - cur_z) * 2.0;
+        combined_velocity.z() = std::max(combined_velocity.z(), recovery_vz);
+      }
+    }
   }
 
   // If executing task and arrived, reduce horizontal velocity to hover
@@ -2710,12 +2714,11 @@ void PlannerNode::swarm_exploration_loop() {
     _was_in_wall_collision = wall_collision;
   }
 
-  // Compute setpoint frequency every 2 seconds
+  // Compute setpoint frequency every 2 seconds (persist across calls for display)
   double now_sec = this->now().seconds();
   double dt_freq = now_sec - _last_freq_time;
-  double freq_hz = 0.0;
   if (dt_freq >= 2.0) {
-    freq_hz = static_cast<double>(_setpoint_count - _last_freq_count) / dt_freq;
+    _last_freq_hz = static_cast<double>(_setpoint_count - _last_freq_count) / dt_freq;
     _last_freq_count = _setpoint_count;
     _last_freq_time = now_sec;
   }
@@ -2724,7 +2727,7 @@ void PlannerNode::swarm_exploration_loop() {
     "[SWARM] drone=%d regions=%zu frontiers=%u task_state=%d pos=(%.1f,%.1f) vel=(%.2f,%.2f) setpoint_hz=%.1f",
     _drone_id, regions.size(), _frontiers_remaining, _task_state,
     my_pos.x(), my_pos.y(),
-    combined_velocity.x(), combined_velocity.y(), freq_hz);
+    combined_velocity.x(), combined_velocity.y(), _last_freq_hz);
 }
 
 // =============================================================================
@@ -2812,6 +2815,64 @@ void PlannerNode::publish_swarm_status() {
   msg.nearest_neighbor_dist = (nearest_dist < 1e6) ? nearest_dist : 0.0;
 
   swarm_status_pub->publish(msg);
+}
+
+// =============================================================================
+// Map Merging (MATLAB: mergeMaps.m)
+// Merges neighbor occupancy grids received via /occupancy_grid topic.
+// For each neighbor within communication_range: merged = max(local, neighbor)
+// =============================================================================
+void PlannerNode::neighbor_grid_callback(
+    const ground_system_msgs::msg::OccupancyGrid2D::SharedPtr msg) {
+  if (!_swarm_mode) return;
+  if (msg->drone_id == _drone_id) return;  // Skip own messages
+
+  // Check if neighbor is within communication range (MATLAB: comm_range_sq check)
+  Eigen::Vector3d my_pos;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
+  }
+
+  Eigen::Vector3d neighbor_pos;
+  {
+    const std::lock_guard<std::mutex> lock(_neighbor_mutex);
+    auto it = _neighbor_states.find(static_cast<int>(msg->drone_id));
+    if (it == _neighbor_states.end() || !it->second.valid) return;
+    double age = (this->now() - it->second.last_update).seconds();
+    if (age > 2.0) return;
+    neighbor_pos = it->second.position;
+  }
+
+  double dist = (neighbor_pos - my_pos).norm();
+  if (dist > _r_comm) return;  // Not within communication range
+
+  // Grid compatibility check
+  if (msg->width != static_cast<uint32_t>(_grid_cols) ||
+      msg->height != static_cast<uint32_t>(_grid_rows)) return;
+
+  // Merge: element-wise max (MATLAB: max(coverage_i, coverage_k))
+  double merge_time = this->now().seconds();
+  {
+    const std::lock_guard<std::mutex> lock(_grid_mutex);
+    uint32_t new_cells = 0;
+    size_t grid_size = _occupancy_grid.size();
+    for (size_t i = 0; i < grid_size && i < msg->data.size(); ++i) {
+      if (msg->data[i] > _occupancy_grid[i]) {
+        if (_occupancy_grid[i] == 0 && msg->data[i] == 1) new_cells++;
+        _occupancy_grid[i] = msg->data[i];
+        // Approximate last_visit_time for merged cells (MATLAB uses max of timestamps;
+        // we don't have the neighbor's timestamps, so use current time as proxy)
+        _last_visit_time[i] = merge_time;
+      }
+    }
+    _cells_explored += new_cells;
+    if (new_cells > 0) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "[MAP-MERGE] drone=%d merged %u cells from drone %u (total=%d/%d)",
+        _drone_id, new_cells, msg->drone_id, _cells_explored, _grid_cols * _grid_rows);
+    }
+  }
 }
 
 void PlannerNode::publish_occupancy_grid() {

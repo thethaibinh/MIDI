@@ -69,7 +69,7 @@ fence_limits:
   max_x: 1000.0
   min_y: -1000.0
   max_y: 1000.0
-  min_z: -1000.0
+  min_z: 10.0
   max_z: 1000.0
 
 # SSTO trajectory generation parameters

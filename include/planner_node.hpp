@@ -232,6 +232,7 @@ class PlannerNode : public rclcpp::Node {
   void publish_swarm_status();
   void publish_occupancy_grid();
   void publish_swarm_metrics();
+  void neighbor_grid_callback(const ground_system_msgs::msg::OccupancyGrid2D::SharedPtr msg);
   Eigen::Vector2d world_to_grid(double wx, double wy) const;
   Eigen::Vector2d grid_to_world(int gx, int gy) const;
   bool is_in_grid(int gx, int gy) const;
@@ -405,6 +406,7 @@ class PlannerNode : public rclcpp::Node {
   uint32_t _setpoint_count{0};
   uint32_t _last_freq_count{0};
   double _last_freq_time{0.0};
+  double _last_freq_hz{0.0};            // Persisted for display (updated every 2s)
   double _collision_radius{1.0};         // Agent-agent collision threshold (m)
   double _wall_collision_distance{0.5};  // Wall collision threshold (m)
 
@@ -416,6 +418,7 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<ground_system_msgs::msg::SwarmMetrics>::SharedPtr swarm_metrics_pub;
   rclcpp::Publisher<ground_system_msgs::msg::SwarmTask>::SharedPtr swarm_task_pub;
   rclcpp::Subscription<ground_system_msgs::msg::SwarmTask>::SharedPtr swarm_task_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::OccupancyGrid2D>::SharedPtr neighbor_grid_sub;
   rclcpp::TimerBase::SharedPtr swarm_exploration_timer_;
   rclcpp::TimerBase::SharedPtr swarm_status_timer_;
   rclcpp::TimerBase::SharedPtr occupancy_pub_timer_;
