@@ -118,7 +118,7 @@ swarm:
   wall_buffer: 10.0       # Boundary repulsion buffer distance (m)
   max_swarm_speed: 12.0    # Max velocity during swarm exploration (m/s)
   altitude: 15.0           # Exploration altitude (m)
-  cell_size: 5.0          # Occupancy grid cell size (m)
+  cell_size: 20.0          # Occupancy grid cell size (m)
   map_width: 1000.0        # Map width (m)
   map_height: 1000.0       # Map height (m)
   map_origin_x: 0.0       # World X of grid cell (0,0) — shared by all drones

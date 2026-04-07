@@ -307,9 +307,10 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
       std::chrono::milliseconds(500),
       std::bind(&PlannerNode::publish_swarm_status, this));
 
-    // Occupancy grid publisher timer (1 Hz)
+    // Occupancy grid publisher timer (5 Hz — MATLAB rebuilds global_map every timestep;
+    // higher frequency reduces staleness of neighbor grids for frontier computation)
     occupancy_pub_timer_ = this->create_wall_timer(
-      std::chrono::seconds(1),
+      std::chrono::milliseconds(200),
       std::bind(&PlannerNode::publish_occupancy_grid, this));
 
     // Metrics publisher timer (0.5 Hz)
@@ -621,8 +622,6 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _frontiers_remaining = 0;
   _task_state = 0;
   _current_task_id = 0;
-  _current_yaw = 0.0;
-  _current_pitch = 0.0;
   if (swarm_exploration_timer_) { swarm_exploration_timer_->cancel(); swarm_exploration_timer_.reset(); }
   if (swarm_status_timer_) { swarm_status_timer_->cancel(); swarm_status_timer_.reset(); }
   if (occupancy_pub_timer_) { occupancy_pub_timer_->cancel(); occupancy_pub_timer_.reset(); }
@@ -1781,10 +1780,6 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
   if (_motion_mode != old_mode) {
     RCLCPP_INFO(this->get_logger(), "[SWARM] Motion mode changed to %s",
                 _motion_mode == 1 ? "3D" : "2D");
-    if (_motion_mode == 0) {
-      // Switching to 2D: reset pitch to zero
-      _current_pitch = 0.0;
-    }
   }
 
   if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
@@ -1859,63 +1854,64 @@ void PlannerNode::update_occupancy_grid() {
   }
 
   double current_time = this->now().seconds();
-  // Single-cell observation model (matches MATLAB updateRobotLocalMap.m):
-  // Mark only the grid cell the drone is currently in as explored.
-  // Coverage propagation across the swarm happens via map merging.
-  Eigen::Vector2d my_gc = world_to_grid(pos.x(), pos.y());
-  int cx = static_cast<int>(my_gc.x());
-  int cy = static_cast<int>(my_gc.y());
-
-  // One-time diagnostic to verify single-cell model is compiled and active
-  static bool diag_printed = false;
-  if (!diag_printed) {
-    RCLCPP_WARN(this->get_logger(),
-      "[SINGLE-CELL] cell_size=%.1f grid=%dx%d drone=%d pos=(%.1f,%.1f) cell=(%d,%d)",
-      _grid_cell_size, _grid_cols, _grid_rows,
-      _drone_id, pos.x(), pos.y(), cx, cy);
-    diag_printed = true;
+  // Single-cell observation model (matches MATLAB updateRobotLocalMap.m exactly):
+  // Mark the one grid cell containing the drone's ground-plane position.
+  int gx = static_cast<int>((pos.x() - _grid_origin_x) / _grid_cell_size);
+  int gy = static_cast<int>((pos.y() - _grid_origin_y) / _grid_cell_size);
+  gx = std::clamp(gx, 0, _grid_cols - 1);
+  gy = std::clamp(gy, 0, _grid_rows - 1);
+  int idx = gy * _grid_cols + gx;
+  if (_occupancy_grid[idx] == 0) {
+    _occupancy_grid[idx] = 1;  // free/explored
+    _cells_explored++;
   }
-
-  int new_cells = 0;
-  if (is_in_grid(cx, cy)) {
-    int idx = cy * _grid_cols + cx;
-    if (_occupancy_grid[idx] == 0) {
-      _occupancy_grid[idx] = 1;  // free/explored
-      _cells_explored++;
-      new_cells++;
-    }
-    _visit_counts[idx]++;
-    _last_visit_time[idx] = current_time;
-  }
-
-  // Periodic diagnostic: log when new cells are explored
-  if (new_cells > 0) {
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-      "[SINGLE-CELL] drone=%d explored %d new cells (total=%d/%d) pos=(%.1f,%.1f)",
-      _drone_id, new_cells, _cells_explored, _grid_cols * _grid_rows, pos.x(), pos.y());
-  }
+  _visit_counts[idx]++;
+  _last_visit_time[idx] = current_time;
 }
 
 // =============================================================================
-// Dynamic Frontier Region Grouping (BFS-based)
+// Dynamic Frontier Region Grouping (Paper Section 3.1.3, Eq. 20-21)
 // =============================================================================
+// Paper definition: A cell g_m in G_known is a FRONTIER CELL if it has at least
+// one 4-connected neighbor in G_unk. Frontier cells are clustered into connected
+// regions {R_1, ..., R_NF}. Centroid is computed over frontier cells only.
+//
+// This differs from the MATLAB implementation which BFS-floods through all
+// unexplored cells (producing one giant region with centroid near map center).
+// The paper approach gives thin frontier strips whose centroids track the
+// exploration boundary and move outward as drones explore.
 
 std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
   const std::lock_guard<std::mutex> lock(_grid_mutex);
 
-  // Identify all frontier cells (free cell adjacent to unknown)
-  static const int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
-  static const int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
+  // Build global map from own grid + all cached neighbor grids
+  size_t total_cells = _occupancy_grid.size();
+  std::vector<uint8_t> global_grid(_occupancy_grid);
+  for (const auto& [drone_id, ngrid] : _neighbor_grids) {
+    if (ngrid.size() != total_cells) continue;
+    for (size_t i = 0; i < total_cells; ++i) {
+      if (ngrid[i] > global_grid[i]) global_grid[i] = ngrid[i];
+    }
+  }
 
+  // 4-connected for frontier check (paper: "at least one 4-connected neighbor")
+  static const int dx4[] = {-1, 1, 0, 0};
+  static const int dy4[] = {0, 0, -1, 1};
+  // 8-connected for BFS grouping of frontier cells into regions
+  static const int dx8[] = {-1, 1, 0, 0, -1, -1, 1, 1};
+  static const int dy8[] = {0, 0, -1, 1, -1, 1, -1, 1};
+
+  // Step 1: Mark all frontier cells (explored cells with >=1 unexplored 4-neighbor)
   std::vector<bool> is_frontier(_grid_cols * _grid_rows, false);
   for (int gy = 0; gy < _grid_rows; ++gy) {
     for (int gx = 0; gx < _grid_cols; ++gx) {
       int idx = gy * _grid_cols + gx;
-      if (_occupancy_grid[idx] != 1) continue;
-      for (int d = 0; d < 8; ++d) {
-        int nx = gx + dx[d], ny = gy + dy[d];
+      if (global_grid[idx] != 1) continue;  // Must be explored
+
+      for (int d = 0; d < 4; ++d) {
+        int nx = gx + dx4[d], ny = gy + dy4[d];
         if (!is_in_grid(nx, ny)) continue;
-        if (_occupancy_grid[ny * _grid_cols + nx] == 0) {
+        if (global_grid[ny * _grid_cols + nx] == 0) {
           is_frontier[idx] = true;
           break;
         }
@@ -1923,7 +1919,7 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
     }
   }
 
-  // BFS flood-fill to group connected frontier cells into regions
+  // Step 2: BFS to group connected frontier cells into regions (8-connected)
   std::vector<bool> visited(_grid_cols * _grid_rows, false);
   std::vector<FrontierRegion> regions;
 
@@ -1932,11 +1928,11 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
       int idx = gy * _grid_cols + gx;
       if (!is_frontier[idx] || visited[idx]) continue;
 
-      // BFS from this frontier cell
       FrontierRegion region;
       region.size = 0;
       region.avg_last_visit = 0.0;
-      double sum_x = 0.0, sum_y = 0.0, sum_visit = 0.0;
+      double sum_x = 0.0, sum_y = 0.0;
+      double visit_time_sum = 0.0;
 
       std::queue<std::pair<int, int>> bfs_queue;
       bfs_queue.push({gx, gy});
@@ -1950,13 +1946,12 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
         Eigen::Vector2d wc = grid_to_world(cx, cy);
         sum_x += wc.x();
         sum_y += wc.y();
-        sum_visit += _last_visit_time[cidx];
+        visit_time_sum += _last_visit_time[cidx];
         region.size++;
-        region.cells.push_back(wc);
 
-        // Expand to 8-connected frontier neighbors
+        // Expand to 8-connected frontier neighbors only
         for (int d = 0; d < 8; ++d) {
-          int nnx = cx + dx[d], nny = cy + dy[d];
+          int nnx = cx + dx8[d], nny = cy + dy8[d];
           if (!is_in_grid(nnx, nny)) continue;
           int nidx = nny * _grid_cols + nnx;
           if (is_frontier[nidx] && !visited[nidx]) {
@@ -1968,7 +1963,8 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
 
       if (region.size > 0) {
         region.centroid = Eigen::Vector2d(sum_x / region.size, sum_y / region.size);
-        region.avg_last_visit = sum_visit / region.size;
+        // Paper Eq. 22: mean time since last visit over frontier cells in region
+        region.avg_last_visit = visit_time_sum / region.size;
         regions.push_back(region);
       }
     }
@@ -2450,29 +2446,11 @@ void PlannerNode::swarm_exploration_loop() {
   _frontiers_remaining = 0;
   for (const auto& r : regions) _frontiers_remaining += r.size;
 
-  // 5. Select best frontier region, then target the nearest cell in it
-  Eigen::Vector2d frontier_target;
+  // 5. Select best frontier region and target its centroid (paper Eq. 26,
+  //    MATLAB calculateFrontierVelocity.m: v_frontier = centroid - robot_pos)
   if (!regions.empty()) {
     auto best_region = select_frontier_region(regions);
-    // Use the nearest frontier cell to this drone, not the region centroid.
-    // Centroid of a ring-shaped frontier region sits at the center (≈ drone pos),
-    // giving zero attraction.  Nearest-cell pushes each drone outward.
-    Eigen::Vector3d my_pos_ft;
-    {
-      const std::lock_guard<std::mutex> slock(state_mutex_);
-      my_pos_ft = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
-    }
-    Eigen::Vector2d my_2d(my_pos_ft.x(), my_pos_ft.y());
-    double best_dist_sq = std::numeric_limits<double>::max();
-    frontier_target = best_region.centroid;  // fallback
-    for (const auto& fc : best_region.cells) {
-      double dsq = (fc - my_2d).squaredNorm();
-      if (dsq < best_dist_sq) {
-        best_dist_sq = dsq;
-        frontier_target = fc;
-      }
-    }
-    _assigned_frontier = frontier_target;
+    _assigned_frontier = best_region.centroid;
     _has_frontier = true;
   } else {
     _has_frontier = false;
@@ -2592,7 +2570,7 @@ void PlannerNode::swarm_exploration_loop() {
     combined_velocity = (combined_velocity / cv_mag) * _max_swarm_speed;
   }
 
-  // Motion mode branching: 2D (fixed altitude) vs 3D (heading-rate-limited)
+  // Motion mode branching: 2D (fixed altitude) vs 3D (point-mass, direct velocity)
   if (_motion_mode == 0) {
     // ---- 2D MODE: Enforce altitude with proportional controller ----
     {
@@ -2600,40 +2578,7 @@ void PlannerNode::swarm_exploration_loop() {
       combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
     }
   } else {
-    // ---- 3D MODE: Heading-rate-limited motion (paper Section 3.1.4) ----
-    // Desired heading from velocity vector
-    double ux = combined_velocity.x();
-    double uy = combined_velocity.y();
-    double uz = combined_velocity.z();
-    double horiz_mag = std::sqrt(ux * ux + uy * uy);
-
-    double desired_yaw = std::atan2(uy, ux);
-    double desired_pitch = std::atan2(uz, horiz_mag + 1e-6);
-
-    // Wrap angle difference to [-pi, pi]
-    auto wrap_angle = [](double a) -> double {
-      while (a > M_PI) a -= 2.0 * M_PI;
-      while (a < -M_PI) a += 2.0 * M_PI;
-      return a;
-    };
-
-    // Proportional controller with saturation (paper Eq. 28-29)
-    double dt_loop = 0.1;  // swarm loop runs at 10 Hz
-    double yaw_error = wrap_angle(desired_yaw - _current_yaw);
-    double yaw_rate = std::clamp(_heading_gain * yaw_error, -_max_yaw_rate, _max_yaw_rate);
-    _current_yaw += yaw_rate * dt_loop;
-    _current_yaw = wrap_angle(_current_yaw);
-
-    double pitch_error = wrap_angle(desired_pitch - _current_pitch);
-    double pitch_rate = std::clamp(_heading_gain * pitch_error, -_max_pitch_rate, _max_pitch_rate);
-    _current_pitch += pitch_rate * dt_loop;
-    _current_pitch = std::clamp(_current_pitch, -M_PI / 4.0, M_PI / 4.0);  // Limit to ±45°
-
-    // Reconstruct velocity from tracked heading (paper Eq. 30)
-    combined_velocity.x() = _max_swarm_speed * std::cos(_current_yaw) * std::cos(_current_pitch);
-    combined_velocity.y() = _max_swarm_speed * std::sin(_current_yaw) * std::cos(_current_pitch);
-    combined_velocity.z() = _max_swarm_speed * std::sin(_current_pitch);
-
+    // ---- 3D MODE: Direct velocity (point-mass model, no heading-rate) ----
     // Altitude floor recovery: if below fence_min_z, override Z velocity to climb back
     {
       const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -2663,12 +2608,8 @@ void PlannerNode::swarm_exploration_loop() {
   target_pos.y() = std::clamp(target_pos.y(), _fence_min_y, _fence_max_y);
   target_pos.z() = std::clamp(target_pos.z(), _fence_min_z, _fence_max_z);
 
-  // Heading: use rate-limited yaw in 3D mode, instantaneous in 2D
-  if (_motion_mode == 1) {
-    _goal_heading = _current_yaw;
-  } else {
-    _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
-  }
+  // Heading: instantaneous from velocity (point-mass, no heading-rate in either mode)
+  _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
 
   // 9. Publish velocity setpoint (paper's algorithm outputs velocity directly)
   _setpoint_count++;
@@ -2867,6 +2808,11 @@ void PlannerNode::neighbor_grid_callback(
       }
     }
     _cells_explored += new_cells;
+
+    // Cache this neighbor's full grid for global-map frontier computation
+    // (MATLAB: global_map.coverage = max across all robot_local_maps each timestep)
+    _neighbor_grids[static_cast<int>(msg->drone_id)].assign(msg->data.begin(), msg->data.end());
+
     if (new_cells > 0) {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
         "[MAP-MERGE] drone=%d merged %u cells from drone %u (total=%d/%d)",

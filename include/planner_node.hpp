@@ -306,13 +306,6 @@ class PlannerNode : public rclcpp::Node {
   int _num_drones{3};
   uint8_t _motion_mode{0};  // 0=2D planar, 1=3D boid swarming
 
-  // Heading-rate-limited motion (3D mode, paper Section 3.1.4)
-  double _current_yaw{0.0};     // Current heading azimuth (rad)
-  double _current_pitch{0.0};   // Current heading elevation (rad)
-  double _max_yaw_rate{1.5};    // Maximum yaw rate (rad/s), paper: theta_dot_max
-  double _max_pitch_rate{0.8};  // Maximum pitch rate (rad/s), paper: phi_dot_max
-  double _heading_gain{2.0};    // Proportional gain for heading tracking, paper: k_omega
-
   // Swarm behavior weights (runtime-tunable via /swarm_params)
   double _w_cohesion{4.0};
   double _w_separation{8.0};
@@ -343,7 +336,7 @@ class PlannerNode : public rclcpp::Node {
   double _swarm_sensor_range{10.0};
 
   // Occupancy grid
-  double _grid_cell_size{10.0};  // Size of each grid cell in meters
+  double _grid_cell_size{20.0};  // Size of each grid cell in meters
   double _grid_width{1000.0};
   double _grid_height{1000.0};
   int _grid_cols{0};
@@ -353,6 +346,10 @@ class PlannerNode : public rclcpp::Node {
   std::vector<uint8_t> _occupancy_grid;  // 0=unknown, 1=free, 2=occupied
   std::mutex _grid_mutex;
   uint32_t _cells_explored{0};
+
+  // Cached neighbor grids for global map construction (MATLAB: global_map = max across all local maps)
+  // Protected by _grid_mutex. Updated in neighbor_grid_callback, read in group_frontier_regions.
+  std::map<int, std::vector<uint8_t>> _neighbor_grids;
 
   // Visit tracking (for revisit heatmap and frontier utility)
   std::vector<uint32_t> _visit_counts;     // Per-cell visit count
