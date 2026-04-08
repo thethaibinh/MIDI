@@ -1882,16 +1882,16 @@ void PlannerNode::update_occupancy_grid() {
 }
 
 // =============================================================================
-// Dynamic Frontier Region Grouping (Paper Section 3.1.3, Eq. 20-21)
+// Dynamic Frontier Region Grouping (MATLAB: groupFrontierRegions.m)
 // =============================================================================
-// Paper definition: A cell g_m in G_known is a FRONTIER CELL if it has at least
-// one 4-connected neighbor in G_unk. Frontier cells are clustered into connected
-// regions {R_1, ..., R_NF}. Centroid is computed over frontier cells only.
+// MATLAB approach: An UNEXPLORED cell that has at least one 8-connected EXPLORED
+// neighbor is a frontier seed.  From that seed, BFS floods through ALL connected
+// unexplored cells (8-connected).  Centroid is computed over the ENTIRE flooded
+// unexplored region, not just the thin boundary strip.
 //
-// This differs from the MATLAB implementation which BFS-floods through all
-// unexplored cells (producing one giant region with centroid near map center).
-// The paper approach gives thin frontier strips whose centroids track the
-// exploration boundary and move outward as drones explore.
+// This produces large regions whose centroids sit roughly at the geometric
+// center of each unexplored connected component — which may be deep inside
+// unexplored territory rather than at the exploration boundary.
 
 std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
   const std::lock_guard<std::mutex> lock(_grid_mutex);
@@ -1906,45 +1906,45 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
     }
   }
 
-  // 4-connected for frontier check (paper: "at least one 4-connected neighbor")
-  static const int dx4[] = {-1, 1, 0, 0};
-  static const int dy4[] = {0, 0, -1, 1};
-  // 8-connected for BFS grouping of frontier cells into regions
+  // 8-connected neighborhood (matches MATLAB dr/dc arrays)
   static const int dx8[] = {-1, 1, 0, 0, -1, -1, 1, 1};
   static const int dy8[] = {0, 0, -1, 1, -1, 1, -1, 1};
 
-  // Step 1: Mark all frontier cells (explored cells with >=1 unexplored 4-neighbor)
-  std::vector<bool> is_frontier(_grid_cols * _grid_rows, false);
-  for (int gy = 0; gy < _grid_rows; ++gy) {
-    for (int gx = 0; gx < _grid_cols; ++gx) {
-      int idx = gy * _grid_cols + gx;
-      if (global_grid[idx] != 1) continue;  // Must be explored
-
-      for (int d = 0; d < 4; ++d) {
-        int nx = gx + dx4[d], ny = gy + dy4[d];
-        if (!is_in_grid(nx, ny)) continue;
-        if (global_grid[ny * _grid_cols + nx] == 0) {
-          is_frontier[idx] = true;
-          break;
-        }
-      }
-    }
-  }
-
-  // Step 2: BFS to group connected frontier cells into regions (8-connected)
   std::vector<bool> visited(_grid_cols * _grid_rows, false);
   std::vector<FrontierRegion> regions;
 
   for (int gy = 0; gy < _grid_rows; ++gy) {
     for (int gx = 0; gx < _grid_cols; ++gx) {
       int idx = gy * _grid_cols + gx;
-      if (!is_frontier[idx] || visited[idx]) continue;
 
+      // MATLAB: if coverage(r,c)==0 && ~visited(r,c)
+      if (global_grid[idx] != 0 || visited[idx]) continue;
+
+      // Check if this unexplored cell has at least one 8-connected explored neighbor
+      // MATLAB: if coverage(nr,nc)==1 && pheromones(nr,nc)>0 → is_frontier = true
+      bool is_frontier = false;
+      double visit_time_sum = 0.0;
+      int visit_time_count = 0;
+      for (int d = 0; d < 8; ++d) {
+        int nx = gx + dx8[d], ny = gy + dy8[d];
+        if (!is_in_grid(nx, ny)) continue;
+        int nidx = ny * _grid_cols + nx;
+        if (global_grid[nidx] == 1) {
+          is_frontier = true;
+          // MATLAB: collect last_visit_times from explored neighbors
+          visit_time_sum += _last_visit_time[nidx];
+          visit_time_count++;
+        }
+      }
+
+      if (!is_frontier) continue;
+
+      // BFS flood through ALL connected unexplored cells (8-connected)
+      // MATLAB: queue = [r,c]; while ~isempty(queue) ... expand to unexplored neighbors
       FrontierRegion region;
       region.size = 0;
       region.avg_last_visit = 0.0;
       double sum_x = 0.0, sum_y = 0.0;
-      double visit_time_sum = 0.0;
 
       std::queue<std::pair<int, int>> bfs_queue;
       bfs_queue.push({gx, gy});
@@ -1954,19 +1954,18 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
         auto [cx, cy] = bfs_queue.front();
         bfs_queue.pop();
 
-        int cidx = cy * _grid_cols + cx;
+        // MATLAB: region_cells = [region_cells; nr, nc]
         Eigen::Vector2d wc = grid_to_world(cx, cy);
         sum_x += wc.x();
         sum_y += wc.y();
-        visit_time_sum += _last_visit_time[cidx];
         region.size++;
 
-        // Expand to 8-connected frontier neighbors only
+        // Expand to 8-connected unexplored neighbors
         for (int d = 0; d < 8; ++d) {
           int nnx = cx + dx8[d], nny = cy + dy8[d];
           if (!is_in_grid(nnx, nny)) continue;
           int nidx = nny * _grid_cols + nnx;
-          if (is_frontier[nidx] && !visited[nidx]) {
+          if (global_grid[nidx] == 0 && !visited[nidx]) {
             visited[nidx] = true;
             bfs_queue.push({nnx, nny});
           }
@@ -1974,16 +1973,17 @@ std::vector<PlannerNode::FrontierRegion> PlannerNode::group_frontier_regions() {
       }
 
       if (region.size > 0) {
+        // MATLAB: centroid_x = mean(region_cells(:,2) - 0.5) * cell_size_m
         region.centroid = Eigen::Vector2d(sum_x / region.size, sum_y / region.size);
-        // Paper Eq. 22: mean time since last visit over frontier cells in region
-        region.avg_last_visit = visit_time_sum / region.size;
+        // Use mean last_visit_time of the explored neighbors of the seed cell
+        region.avg_last_visit = (visit_time_count > 0) ?
+            (visit_time_sum / visit_time_count) : 0.0;
         regions.push_back(region);
       }
     }
   }
   return regions;
 }
-
 // =============================================================================
 // Utility-Based Frontier Selection
 // =============================================================================
