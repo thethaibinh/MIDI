@@ -366,6 +366,14 @@ class PlannerNode : public rclcpp::Node {
   std::map<int, NeighborState> _neighbor_states;
   std::mutex _neighbor_mutex;
 
+  // Heading-rate-limited motion model (paper Section 3.1.4, Eq. 28-31)
+  // Drone always moves forward at max_speed in heading direction;
+  // heading steers toward v_fused via proportional controller.
+  double _current_azimuth{0.0};     // Current yaw heading (radians)
+  double _current_elevation{0.0};   // Current pitch heading (radians, 0 for 2D)
+  double _heading_gain{0.5};        // angular_gain_k (MATLAB: 0.5)
+  double _swarm_dt{0.1};            // Timer period (seconds) — matches 10Hz timer
+
   // Frontier tracking
   Eigen::Vector2d _assigned_frontier{0, 0};
   bool _has_frontier{false};

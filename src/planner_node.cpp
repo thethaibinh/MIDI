@@ -286,6 +286,18 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     _goal_heading = 0.0;
     _goal_set = true;
 
+    // Initialize heading-rate model from current odometry yaw
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      double qw = _state.pose.orientation.w;
+      double qx = _state.pose.orientation.x;
+      double qy = _state.pose.orientation.y;
+      double qz = _state.pose.orientation.z;
+      _current_azimuth = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+      if (_current_azimuth < 0) _current_azimuth += 2.0 * M_PI;
+    }
+    _current_elevation = 0.0;
+
     if (_runtime_mode == RuntimeModes::OMNIDRONES) {
       set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
       steering_value = 0.0f;
@@ -2564,52 +2576,99 @@ void PlannerNode::swarm_exploration_loop() {
     combined_velocity = wf * v_frontier_norm + (1.0 - wf) * v_flock_norm;
   }
 
-  // Scale to max speed
+  // Normalize v_fused to unit direction (paper: v_fused / ||v_fused|| * linear_vel, then
+  // only the direction is used by the heading controller)
   double cv_mag = combined_velocity.norm();
   if (cv_mag > 0.01) {
-    combined_velocity = (combined_velocity / cv_mag) * _max_swarm_speed;
+    combined_velocity = combined_velocity / cv_mag;  // unit direction for heading target
   }
 
-  // Motion mode branching: 2D (fixed altitude) vs 3D (point-mass, direct velocity)
+  // If executing task and arrived, stop: zero velocity, skip heading update
+  bool hovering = (_task_state == 2);
+
+  // 8. Heading-rate-limited motion (paper Section 3.1.4, Eq. 28-31)
+  //    MATLAB updateRobotState.m: drone always moves forward in heading direction
+  //    at max_speed. Heading steers toward v_fused via proportional controller.
+  //    This is a unicycle kinematic model, NOT point-mass Boid theory.
+  double linear_vel = hovering ? 0.0 : _max_swarm_speed;
+
+  if (cv_mag > 0.01 && !hovering) {
+    // Compute desired heading from v_fused direction
+    // MATLAB: [desired_azimuth, desired_elevation] = cart2sph(vx, vy, vz)
+    double desired_azimuth = atan2(combined_velocity.y(), combined_velocity.x());
+    double desired_elevation = atan2(combined_velocity.z(),
+        sqrt(combined_velocity.x() * combined_velocity.x() +
+             combined_velocity.y() * combined_velocity.y()));
+
+    if (_motion_mode == 0) {
+      desired_elevation = 0.0;  // 2D: no pitch
+    }
+
+    // Wrapped angular error (MATLAB: atan2(sin(desired-current), cos(desired-current)))
+    double az_error = atan2(sin(desired_azimuth - _current_azimuth),
+                            cos(desired_azimuth - _current_azimuth));
+    double el_error = atan2(sin(desired_elevation - _current_elevation),
+                            cos(desired_elevation - _current_elevation));
+
+    // Proportional heading controller (MATLAB: angular_vel = angular_gain_k * error)
+    double angular_vel_az = _heading_gain * az_error;
+    double angular_vel_el = (_motion_mode == 0) ? 0.0 : (_heading_gain * el_error);
+
+    // Integrate heading (MATLAB: updated = current + angular_vel * dt)
+    _current_azimuth = fmod(_current_azimuth + angular_vel_az * _swarm_dt, 2.0 * M_PI);
+    if (_current_azimuth < 0) _current_azimuth += 2.0 * M_PI;
+    _current_elevation += angular_vel_el * _swarm_dt;
+  }
+
   if (_motion_mode == 0) {
-    // ---- 2D MODE: Enforce altitude with proportional controller ----
+    _current_elevation = 0.0;
+  }
+
+  // Reconstruct velocity from heading (MATLAB: [dx,dy,dz] = sph2cart(az, el, 1))
+  double dx = cos(_current_azimuth) * cos(_current_elevation);
+  double dy = sin(_current_azimuth) * cos(_current_elevation);
+  double dz = sin(_current_elevation);
+  Eigen::Vector3d heading_velocity(dx * linear_vel, dy * linear_vel, dz * linear_vel);
+
+  // Altitude control overlays
+  if (_motion_mode == 0) {
+    // 2D MODE: altitude hold via proportional controller
+    double cur_z;
     {
       const std::lock_guard<std::mutex> lock(state_mutex_);
-      combined_velocity.z() = (_swarm_altitude - _state.pose.position.z) * 2.0;
+      cur_z = _state.pose.position.z;
     }
+    heading_velocity.z() = (_swarm_altitude - cur_z) * 2.0;
   } else {
-    // ---- 3D MODE: Direct velocity (point-mass model, no heading-rate) ----
-    // Altitude floor recovery: if below fence_min_z, override Z velocity to climb back
+    // 3D MODE: altitude floor recovery
+    double cur_z;
     {
       const std::lock_guard<std::mutex> lock(state_mutex_);
-      double cur_z = _state.pose.position.z;
-      if (cur_z < _fence_min_z + _wall_buffer) {
-        double recovery_vz = (_fence_min_z + _wall_buffer - cur_z) * 2.0;
-        combined_velocity.z() = std::max(combined_velocity.z(), recovery_vz);
-      }
+      cur_z = _state.pose.position.z;
+    }
+    if (cur_z < _fence_min_z + _wall_buffer) {
+      double recovery_vz = (_fence_min_z + _wall_buffer - cur_z) * 2.0;
+      heading_velocity.z() = std::max(heading_velocity.z(), recovery_vz);
     }
   }
 
-  // If executing task and arrived, reduce horizontal velocity to hover
-  if (_task_state == 2) {
-    combined_velocity.x() = 0.0;
-    combined_velocity.y() = 0.0;
-  }
-
-  // 8. Set goal position = current + velocity * lookahead
+  // Set goal position = current + velocity * lookahead
   double lookahead = 2.0;
   Eigen::Vector3d my_pos;
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     my_pos = Eigen::Vector3d(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
   }
-  Eigen::Vector3d target_pos = my_pos + combined_velocity * lookahead;
+  Eigen::Vector3d target_pos = my_pos + heading_velocity * lookahead;
   target_pos.x() = std::clamp(target_pos.x(), _fence_min_x, _fence_max_x);
   target_pos.y() = std::clamp(target_pos.y(), _fence_min_y, _fence_max_y);
   target_pos.z() = std::clamp(target_pos.z(), _fence_min_z, _fence_max_z);
 
-  // Heading: instantaneous from velocity (point-mass, no heading-rate in either mode)
-  _goal_heading = atan2(combined_velocity.y(), combined_velocity.x());
+  // Heading from current azimuth (heading-rate model: heading IS the state)
+  _goal_heading = _current_azimuth;
+
+  // Replace combined_velocity with heading_velocity for publishing and logging
+  combined_velocity = heading_velocity;
 
   // 9. Publish velocity setpoint (paper's algorithm outputs velocity directly)
   _setpoint_count++;
@@ -2623,6 +2682,16 @@ void PlannerNode::swarm_exploration_loop() {
   } else {
     public_ref_pos(swarm_ref);
   }
+
+  RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "[HEADING] az=%.1f deg el=%.1f deg speed=%.1f",
+    _current_azimuth * 180.0 / M_PI, _current_elevation * 180.0 / M_PI, linear_vel);
+
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "[HEADING-RATE] drone=%d az=%.1f° vel=(%.2f,%.2f,%.2f) cv_dir=(%.2f,%.2f) hovering=%d",
+    _drone_id, _current_azimuth * 180.0 / M_PI,
+    heading_velocity.x(), heading_velocity.y(), heading_velocity.z(),
+    combined_velocity.x(), combined_velocity.y(), hovering ? 1 : 0);
 
   // 10. Collision detection for metrics (edge-detect: count transitions into zone)
   {
