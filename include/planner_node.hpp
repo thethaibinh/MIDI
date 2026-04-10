@@ -312,6 +312,8 @@ class PlannerNode : public rclcpp::Node {
   double _w_alignment{2.0};
   double _w_frontier{0.35};
   double _w_obstacle{8.0};
+  double _w_inertia{0.7};           // Previous-velocity inertia weight (Eq. 1, Vu et al. 2022)
+  bool _enable_frontier_force{false}; // Frontier attraction on/off (GUI toggle)
 
   // Per-rule radii (paper: R_c, R_a, R_s, R_critical)
   double _r_cohesion{400.0};

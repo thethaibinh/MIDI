@@ -109,6 +109,8 @@ swarm:
   w_alignment: 2.0        # Match neighbor heading (W_a)
   w_frontier: 0.35         # Frontier vs flocking blend factor w_f ∈ [0,1]
   w_obstacle: 8.0         # Repulsion from boundaries (W_w)
+  w_inertia: 0.7           # Previous-velocity inertia weight w (Vu et al. 2022, Eq. 1)
+  enable_frontier_force: false  # Frontier attraction on/off (GUI toggle)
   # Per-rule radii (paper: R_c, R_a, R_s, R_critical)
   r_cohesion: 400.0        # Cohesion radius R_c (m)
   r_alignment: 70.0       # Alignment radius R_a (m)

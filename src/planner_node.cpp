@@ -1794,6 +1794,10 @@ void PlannerNode::swarm_params_callback(const ground_system_msgs::msg::SwarmPara
                 _motion_mode == 1 ? "3D" : "2D");
   }
 
+  // Frontier force toggle and velocity inertia weight
+  _enable_frontier_force = msg->enable_frontier_force;
+  if (msg->w_inertia >= 0.0) _w_inertia = msg->w_inertia;
+
   if (msg->cell_size > 0.01 && msg->map_width > 0.1 && msg->map_height > 0.1) {
     if (std::abs(msg->cell_size - _grid_cell_size) > 0.001 ||
         std::abs(msg->map_width - _grid_width) > 0.1 ||
@@ -2548,21 +2552,28 @@ void PlannerNode::swarm_exploration_loop() {
               _w_separation * separation_force +
               _w_obstacle * boundary_force;
 
-    if (_has_frontier) {
+    if (_has_frontier && _enable_frontier_force) {
       v_frontier_vec = compute_frontier_attraction(_assigned_frontier);
       // Paper: v_frontier already scaled by w_f inside calculateFrontierVelocity
       // We keep it as unit vector here and apply w_f in the fusion below
     }
   }
 
-  // 7. Velocity fusion (paper: updateRobotState.m)
-  //    v_fused = w_f * v_frontier + (1 - w_f) * v_flock
-  //    where w_f ∈ [0,1] controls frontier vs flocking priority
+  // 7. Velocity fusion (Vu et al. 2022, Eq. 1)
+  //    v(t+1) = w * v(t) + w_c*c(t) + w_s*s(t) + w_a*a(t) + w_w*w(t) + w_f*f(t)
+  //    The inertia term w*v(t) maintains flock momentum.
+
+  // Current velocity direction from heading state — this is v(t)
+  double prev_dx = cos(_current_azimuth) * cos(_current_elevation);
+  double prev_dy = sin(_current_azimuth) * cos(_current_elevation);
+  double prev_dz = sin(_current_elevation);
+  Eigen::Vector3d v_prev(prev_dx, prev_dy, prev_dz);
+
   double wf = std::clamp(_w_frontier, 0.0, 1.0);
   Eigen::Vector3d combined_velocity;
   if (is_critical || _task_state == 2) {
-    // Emergency or executing task: no blending, just v_flock
-    combined_velocity = v_flock;
+    // Emergency or executing task: inertia + v_flock only
+    combined_velocity = _w_inertia * v_prev + v_flock;
   } else {
     // Normalize v_flock and v_frontier before blending (paper normalizes each)
     Eigen::Vector3d v_flock_norm = v_flock;
@@ -2573,7 +2584,7 @@ void PlannerNode::swarm_exploration_loop() {
     double frontier_mag = v_frontier_norm.norm();
     if (frontier_mag > 0.01) v_frontier_norm = v_frontier_norm / frontier_mag;
 
-    combined_velocity = wf * v_frontier_norm + (1.0 - wf) * v_flock_norm;
+    combined_velocity = _w_inertia * v_prev + wf * v_frontier_norm + (1.0 - wf) * v_flock_norm;
   }
 
   // Normalize v_fused to unit direction (paper: v_fused / ||v_fused|| * linear_vel, then
