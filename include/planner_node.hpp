@@ -55,6 +55,8 @@
 
 // Ground system messages
 #include <ground_system_msgs/msg/start_swarm_mission.hpp>
+#include <ground_system_msgs/msg/swarm_mission_upload.hpp>
+#include <ground_system_msgs/msg/swarm_mission_ack.hpp>
 #include <ground_system_msgs/msg/fbv_goal.hpp>
 #include <ground_system_msgs/msg/benchmark_status.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
@@ -67,6 +69,7 @@
 #include <ground_system_msgs/msg/opus_trajectory_submit.hpp>
 #include <ground_system_msgs/msg/opus_trajectory_ack.hpp>
 #include <ground_system_msgs/msg/ruckig_trajectory.hpp>
+#include <ground_system_msgs/msg/waypoint.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -135,6 +138,8 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<sm::Image>::SharedPtr image_sub;
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
   rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub;
+  rclcpp::Subscription<ground_system_msgs::msg::SwarmMissionUpload>::SharedPtr mission_upload_sub;
+  rclcpp::Publisher<ground_system_msgs::msg::SwarmMissionAck>::SharedPtr mission_ack_pub_;
   rclcpp::Subscription<ground_system_msgs::msg::FBVGoal>::SharedPtr fbv_goal_sub;
   rclcpp::Subscription<ground_system_msgs::msg::Takeoff>::SharedPtr takeoff_sub;
   rclcpp::Subscription<ground_system_msgs::msg::FlyTo>::SharedPtr fly_to_sub;
@@ -154,6 +159,7 @@ class PlannerNode : public rclcpp::Node {
   
   // Service call state tracking (to avoid duplicate calls and blocking)
   std::atomic<bool> mission_received_{false};
+  std::atomic<bool> mission_uploaded_{false};  // true after waypoints uploaded, before start
   std::atomic<bool> mode_switch_pending_{false};
   std::atomic<bool> arming_pending_{false};
   std::atomic<bool> takeoff_pending_{false};
@@ -190,6 +196,7 @@ class PlannerNode : public rclcpp::Node {
   // Callback functions
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
+  void mission_upload_callback(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr msg);
   void fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg);
   void takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg);
   void fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg);
@@ -264,6 +271,31 @@ class PlannerNode : public rclcpp::Node {
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
   double _goal_heading;  // Heading to goal (computed once when goal is set)
+
+  // Waypoint mission tracking
+  std::vector<ground_system_msgs::msg::Waypoint> _waypoint_list;  // Original FLU waypoints (for logging)
+  std::vector<Eigen::Vector3d> _world_waypoints;  // Pre-computed world-frame positions (reused across loops)
+  std::vector<double> _waypoint_headings;   // Pre-computed world headings per waypoint
+  std::vector<double> _waypoint_hold_times; // Hold time per waypoint
+  size_t _current_waypoint_index = 0;
+  uint32_t _remaining_loops = 0;
+  bool _waypoint_mission_active = false;
+  std::string _mission_name;
+  // Advance to next waypoint; returns false when mission complete
+  bool advance_waypoint();
+  // Set _goal_in_world_frame from pre-computed _world_waypoints at _current_waypoint_index
+  void set_goal_from_waypoint();
+  // Convert FLU waypoints to world frame using agent's initial yaw, store in _world_waypoints
+  void convert_waypoints_to_world(double initial_yaw);
+  // Compute heading from current position toward _goal_in_world_frame
+  double compute_heading_to_goal() const;
+  // Log received mission to YAML file for history/replay
+  void log_mission_to_yaml(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr& msg);
+  // Heading alignment threshold (radians, ~10 degrees)
+  static constexpr double kHeadingAlignThreshold_ = 0.17;
+  // Maximum yaw rate for heading alignment (rad/s)
+  static constexpr double kHeadingAlignYawRate_ = 0.5;
+
   double _max_velocity_x, _max_velocity_y, _max_velocity_z;
   double _max_acceleration_x, _max_acceleration_y, _max_acceleration_z;
   double _acc_planning_threshold, _vel_planning_threshold;
@@ -318,8 +350,10 @@ class PlannerNode : public rclcpp::Node {
   std::chrono::steady_clock::time_point opus_grant_time_{};
   std::chrono::steady_clock::time_point opus_request_time_{};
   std::chrono::steady_clock::time_point opus_submit_time_{};
-  static constexpr double kOpusGrantTimeout_ = 5.0;  // seconds to wait for grant
-  static constexpr double kOpusAckTimeout_ = 3.0;    // seconds to wait for ACK
+  std::chrono::steady_clock::time_point opus_queue_time_{};
+  static constexpr double kOpusGrantTimeout_ = 5.0;   // seconds to wait for initial grant
+  static constexpr double kOpusAckTimeout_ = 3.0;     // seconds to wait for ACK
+  static constexpr double kOpusQueueTimeout_ = 10.0;  // seconds to wait while queued before re-requesting
 };
 
 #endif  // PLANNER_NODE_HPP

@@ -5,9 +5,11 @@ namespace autopilot {
 enum class PlanningStates {
   OFF,
   TAKING_OFF,
+  ALIGNING_HEADING,
   TRAJECTORY_CONTROL,
   WAITING_FOR_OPUS,
   GO_TO_GOAL,
+  HOLDING_WAYPOINT,
   LAND,
   FINISHED
 };

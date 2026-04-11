@@ -60,10 +60,19 @@ PlannerNode::PlannerNode()
       std::bind(&PlannerNode::visualise, this, std::placeholders::_1));
   }
 
-  // Mission command subscriber (unified for sim and real)
+  // Mission command subscriber (start trigger — after upload + ACK)
   mission_sub = this->create_subscription<ground_system_msgs::msg::StartSwarmMission>(
     "/start_swarm_mission", 10,
     std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1));
+
+  // Mission upload subscriber (waypoints — Phase 1, before start)
+  mission_upload_sub = this->create_subscription<ground_system_msgs::msg::SwarmMissionUpload>(
+    "/swarm_mission_upload", 10,
+    std::bind(&PlannerNode::mission_upload_callback, this, std::placeholders::_1));
+
+  // Mission ACK publisher
+  mission_ack_pub_ = this->create_publisher<ground_system_msgs::msg::SwarmMissionAck>(
+    "/swarm_mission_ack", 10);
 
   // FBV (Fly-by-Voice) goal subscriber - receives VLM-extracted goals
   fbv_goal_sub = this->create_subscription<ground_system_msgs::msg::FBVGoal>(
@@ -228,57 +237,128 @@ pointcloud_type* PlannerNode::create_point_cloud(const sm::Image::SharedPtr dept
   return cloud;
 }
 
-void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg) {
-  RCLCPP_INFO(this->get_logger(), "Received mission command: %s", msg->mission_name.c_str());
-  
+// Phase 1: Upload waypoints, convert FLU→world, log, ACK back to GCS
+void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received mission upload: '%s' (%zu waypoints, loop_count=%u)",
+              msg->mission_name.c_str(), msg->waypoints.size(), msg->loop_count);
+
+  // Build ACK message
+  auto ack = ground_system_msgs::msg::SwarmMissionAck();
+  ack.drone_id = opus_drone_id_;
+  ack.mission_name = msg->mission_name;
+
   if (mission_received_) {
-    RCLCPP_WARN(this->get_logger(), "Mission already received, ignoring duplicate");
+    RCLCPP_WARN(this->get_logger(), "Mission already in flight, rejecting upload");
+    ack.success = false;
+    ack.message = "Mission already in flight";
+    ack.num_waypoints = 0;
+    mission_ack_pub_->publish(ack);
     return;
   }
-  
+
+  if (msg->waypoints.empty()) {
+    RCLCPP_WARN(this->get_logger(), "Mission '%s' has no waypoints, rejecting", msg->mission_name.c_str());
+    ack.success = false;
+    ack.message = "No waypoints provided";
+    ack.num_waypoints = 0;
+    mission_ack_pub_->publish(ack);
+    return;
+  }
+
   // Extract trial ID from mission name if it's a benchmark trial
-  // Format: "benchmark_trial_N" where N is the trial number
   if (msg->mission_name.find("benchmark_trial_") == 0) {
     try {
       _current_trial_id = std::stoi(msg->mission_name.substr(16));
-      RCLCPP_INFO(this->get_logger(), "Benchmark trial %d started", _current_trial_id);
+      RCLCPP_INFO(this->get_logger(), "Benchmark trial %d", _current_trial_id);
     } catch (...) {
       _current_trial_id++;
     }
   } else {
     _current_trial_id++;
   }
-  
-  // Set goal coordinates based on coordinate frame convention
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // OmniDrones uses NWU (North-West-Up): X=North, Y=West, Z=Up
-    _goal_in_world_frame.x = _state.pose.position.x + _goal_north_coordinate;
-    _goal_in_world_frame.y = _state.pose.position.y + _goal_west_coordinate;
-    _goal_in_world_frame.z = _goal_up_coordinate;
-  } else {
-    // MAVROS uses ENU (East-North-Up): X=East, Y=North, Z=Up
-    _goal_in_world_frame.x = _state.pose.position.x - _goal_west_coordinate;
-    _goal_in_world_frame.y = _state.pose.position.y + _goal_north_coordinate;
-    _goal_in_world_frame.z = _goal_up_coordinate;
+
+  _mission_name = msg->mission_name;
+
+  // Store home position before computing goal (relative waypoints use this)
+  _home_in_world_frame = _state.pose.position;
+
+  // Get initial yaw for FLU→world conversion
+  double qw = _state.pose.orientation.w;
+  double qx = _state.pose.orientation.x;
+  double qy = _state.pose.orientation.y;
+  double qz = _state.pose.orientation.z;
+  double initial_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
+                                   1.0 - 2.0 * (qy * qy + qz * qz));
+
+  _waypoint_list.assign(msg->waypoints.begin(), msg->waypoints.end());
+  _current_waypoint_index = 0;
+  _remaining_loops = msg->loop_count > 0 ? msg->loop_count - 1 : 0;
+  _waypoint_mission_active = true;
+
+  // Derive takeoff altitude from first waypoint (can be overridden by prior takeoff command)
+  if (_goal_up_coordinate <= 0.0) {
+    _goal_up_coordinate = msg->waypoints[0].up;
   }
-  RCLCPP_INFO(this->get_logger(), "Setting goal to (%.2f, %.2f, %.2f)",
-              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
+
+  // Convert FLU waypoints to world frame ONCE using initial yaw.
+  convert_waypoints_to_world(initial_yaw);
+
+  RCLCPP_INFO(this->get_logger(), "Mission '%s' uploaded: %zu waypoints, %u total passes, initial_yaw=%.1f deg",
+              msg->mission_name.c_str(), _waypoint_list.size(),
+              msg->loop_count > 0 ? msg->loop_count : 1,
+              initial_yaw * 180.0 / M_PI);
+
+  set_goal_from_waypoint();
+  _goal_heading = compute_heading_to_goal();
   _goal_set = true;
+  mission_uploaded_ = true;
+  log_mission_to_yaml(msg);
+
+  // Publish ACK
+  ack.success = true;
+  ack.num_waypoints = static_cast<uint32_t>(msg->waypoints.size());
+  ack.message = "OK";
+  mission_ack_pub_->publish(ack);
+  RCLCPP_INFO(this->get_logger(), "Mission ACK sent (success, %u waypoints)", ack.num_waypoints);
+}
+
+// Phase 2: Start swarming (triggered by GCS after all agents ACK)
+void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg) {
+  RCLCPP_INFO(this->get_logger(), "Received START command: '%s'", msg->mission_name.c_str());
+
+  if (mission_received_) {
+    RCLCPP_WARN(this->get_logger(), "Mission already started, ignoring duplicate start");
+    return;
+  }
+
+  if (!mission_uploaded_) {
+    RCLCPP_ERROR(this->get_logger(), "No mission uploaded! Upload waypoints before starting.");
+    return;
+  }
+
+  if (msg->mission_name != _mission_name) {
+    RCLCPP_ERROR(this->get_logger(), "Mission name mismatch: uploaded='%s', start='%s'",
+                 _mission_name.c_str(), msg->mission_name.c_str());
+    return;
+  }
+
   mission_received_ = true;
-  
+
+  RCLCPP_INFO(this->get_logger(), "Starting mission '%s': goal=(%.2f, %.2f, %.2f), heading=%.1f deg",
+              _mission_name.c_str(),
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
+              _goal_heading * 180.0 / M_PI);
+
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // Simulation mode: directly start trajectory control
     RCLCPP_WARN(this->get_logger(), "[SIM] Starting navigation!");
     set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-    _home_in_world_frame = _state.pose.position;
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
     reference_trajectory_ = ruckig::Trajectory<3>();
     had_reference_trajectory = false;
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
-    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
-    RCLCPP_WARN(this->get_logger(), "[MAVROS] Mission received, initiating flight sequence...");
+    RCLCPP_WARN(this->get_logger(), "[MAVROS] Initiating flight sequence...");
   }
 }
 
@@ -501,6 +581,7 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _steered = false;
   _goal_set = false;
   mission_received_ = false;
+  mission_uploaded_ = false;
   mode_switch_pending_ = false;
   arming_pending_ = false;
   takeoff_pending_ = false;
@@ -515,6 +596,14 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   _last_valid_heading = 0.0;
   // Reset takeoff altitude
   _goal_up_coordinate = 0.0;
+  // Reset waypoint mission state
+  _waypoint_list.clear();
+  _world_waypoints.clear();
+  _waypoint_headings.clear();
+  _waypoint_hold_times.clear();
+  _current_waypoint_index = 0;
+  _remaining_loops = 0;
+  _waypoint_mission_active = false;
   // Reset OPUS coordination state
   if (opus_enabled_) {
     const std::lock_guard<std::mutex> olock(opus_mutex_);
@@ -752,21 +841,78 @@ void PlannerNode::update_planner_state() {
   //     "State check: current_z=%.2f, goal_z=%.2f, threshold=%.2f, state=%d",
   //     _state.pose.position.z, _goal_in_world_frame.z, _goal_in_world_frame.z - 0.1, (int)_planner_state);
 
-  // Transition from TAKING_OFF to TRAJECTORY_CONTROL when takeoff altitude reached
+  // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached
   // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
   // This allows FBV/fly_to goals with different altitudes to work properly
   double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
   if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
-    RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), transitioning to TRAJECTORY_CONTROL",
+    RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), aligning heading to goal",
                 _state.pose.position.z, takeoff_complete_altitude);
-    set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+    if (_waypoint_mission_active && _current_waypoint_index < _waypoint_headings.size()) {
+      _goal_heading = _waypoint_headings[_current_waypoint_index];
+    } else {
+      _goal_heading = compute_heading_to_goal();
+    }
+    set_auto_pilot_state_forced(PlanningStates::ALIGNING_HEADING);
   }
-  // Transition to GO_TO_GOAL when near goal
+  // ALIGNING_HEADING → TRAJECTORY_CONTROL when heading is within threshold
+  else if (_planner_state == PlanningStates::ALIGNING_HEADING) {
+    // Get current yaw from quaternion
+    double qw = _state.pose.orientation.w;
+    double qx = _state.pose.orientation.x;
+    double qy = _state.pose.orientation.y;
+    double qz = _state.pose.orientation.z;
+    double current_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
+                                     1.0 - 2.0 * (qy * qy + qz * qz));
+    double yaw_error = _goal_heading - current_yaw;
+    // Normalize to [-pi, pi]
+    while (yaw_error > M_PI) yaw_error -= 2.0 * M_PI;
+    while (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "Aligning heading: current=%.1f deg, target=%.1f deg, error=%.1f deg",
+      current_yaw * 180.0 / M_PI, _goal_heading * 180.0 / M_PI,
+      yaw_error * 180.0 / M_PI);
+
+    if (std::abs(yaw_error) < kHeadingAlignThreshold_) {
+      RCLCPP_INFO(this->get_logger(), "Heading aligned (error=%.1f deg), starting trajectory control",
+                  yaw_error * 180.0 / M_PI);
+      // Clear trajectory state so planner starts fresh
+      had_reference_trajectory = false;
+      trajectory_queue_.clear();
+      set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+    }
+  }
+  // Transition to GO_TO_GOAL / HOLDING_WAYPOINT when near goal
   else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL &&
            (distance_to_goal < _go_to_goal_threshold ||
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
-    set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
+    if (_waypoint_mission_active) {
+      // Abort any OPUS planning state since we're done with this segment
+      opus_abort_planning("Waypoint reached, advancing");
+      set_auto_pilot_state_forced(PlanningStates::HOLDING_WAYPOINT);
+    } else {
+      opus_abort_planning("Goal reached");
+      set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
+    }
+  }
+  // HOLDING_WAYPOINT: hold position for hold_time, then advance
+  else if (_planner_state == PlanningStates::HOLDING_WAYPOINT) {
+    double time_in_state = (this->now() - time_of_switch_to_current_state_).seconds();
+    double hold_time = 1.0;  // default
+    if (_current_waypoint_index < _waypoint_hold_times.size()) {
+      hold_time = _waypoint_hold_times[_current_waypoint_index];
+    }
+    if (time_in_state >= hold_time) {
+      if (advance_waypoint()) {
+        // More waypoints → align heading then plan to next
+        set_auto_pilot_state_forced(PlanningStates::ALIGNING_HEADING);
+      } else {
+        // Mission complete → go to goal (final position hold)
+        set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
+      }
+    }
   }
   // Land when at goal (MAVROS only)
   // else if (_runtime_mode == RuntimeModes::MAVROS &&
@@ -807,6 +953,27 @@ void PlannerNode::track_trajectory() {
       _planner_state == PlanningStates::OFF ||
       !_goal_set)
     return;
+
+  // ALIGNING_HEADING and HOLDING_WAYPOINT: hold position, rotate toward goal
+  if (_planner_state == PlanningStates::ALIGNING_HEADING ||
+      _planner_state == PlanningStates::HOLDING_WAYPOINT) {
+    if (_runtime_mode == RuntimeModes::MAVROS) {
+      TrajectoryPoint hold_point;
+      hold_point.position = geometryToEigen(_state.pose.position);
+      hold_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+      hold_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+      hold_point.heading = _goal_heading;
+      public_ref_pos(hold_point);
+    } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+      TrajectoryPoint hold_point;
+      hold_point.position = geometryToEigen(_state.pose.position);
+      hold_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+      hold_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+      hold_point.heading = _goal_heading;
+      public_ref_pos(hold_point);
+    }
+    return;
+  }
   
   // For TRAJECTORY_CONTROL state, we need a reference trajectory
   // But for TAKING_OFF and GO_TO_GOAL states, we can publish setpoints without trajectory
@@ -1063,6 +1230,176 @@ void PlannerNode::publish_benchmark_status(uint8_t status) {
   benchmark_status_pub->publish(msg);
 }
 
+// ============================================================================
+// Waypoint Mission Helpers
+// ============================================================================
+
+void PlannerNode::set_goal_from_waypoint() {
+  if (_current_waypoint_index >= _world_waypoints.size()) return;
+
+  const auto& wp_world = _world_waypoints[_current_waypoint_index];
+  _goal_in_world_frame.x = wp_world.x();
+  _goal_in_world_frame.y = wp_world.y();
+  _goal_in_world_frame.z = wp_world.z();
+
+  // Use pre-computed heading (NaN was resolved during convert_waypoints_to_world)
+  _goal_heading = _waypoint_headings[_current_waypoint_index];
+
+  RCLCPP_INFO(this->get_logger(), "Waypoint %zu/%zu: world=(%.2f,%.2f,%.2f) heading=%.1f deg",
+              _current_waypoint_index + 1, _world_waypoints.size(),
+              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
+              _goal_heading * 180.0 / M_PI);
+}
+
+bool PlannerNode::advance_waypoint() {
+  _current_waypoint_index++;
+
+  if (_current_waypoint_index >= _world_waypoints.size()) {
+    if (_remaining_loops > 0) {
+      _remaining_loops--;
+      _current_waypoint_index = 0;
+      RCLCPP_INFO(this->get_logger(), "Waypoint loop restart (%u loops remaining)",
+                  _remaining_loops);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Waypoint mission complete");
+      _waypoint_mission_active = false;
+      return false;
+    }
+  }
+
+  set_goal_from_waypoint();
+  return true;
+}
+
+void PlannerNode::convert_waypoints_to_world(double initial_yaw) {
+  _world_waypoints.clear();
+  _waypoint_headings.clear();
+  _waypoint_hold_times.clear();
+
+  double cos_yaw = std::cos(initial_yaw);
+  double sin_yaw = std::sin(initial_yaw);
+  double home_x = _home_in_world_frame.x;
+  double home_y = _home_in_world_frame.y;
+
+  for (size_t i = 0; i < _waypoint_list.size(); i++) {
+    const auto& wp = _waypoint_list[i];
+
+    // Rotate FLU (Forward/Left/Up) by initial yaw to get world-frame offset
+    // Body FLU: X=Forward, Y=Left, Z=Up
+    // World ENU: X=East, Y=North, Z=Up (MAVROS)
+    // World NWU: X=North, Y=West, Z=Up (OmniDrones)
+    // The rotation is the same in both conventions — yaw rotates the horizontal plane
+    double world_dx = cos_yaw * wp.forward - sin_yaw * wp.left;
+    double world_dy = sin_yaw * wp.forward + cos_yaw * wp.left;
+
+    Eigen::Vector3d wp_world(home_x + world_dx, home_y + world_dy, wp.up);
+    _world_waypoints.push_back(wp_world);
+    _waypoint_hold_times.push_back(wp.hold_time);
+
+    // Pre-compute heading: if NaN, compute from home (or previous WP) toward this WP
+    if (std::isnan(wp.heading)) {
+      Eigen::Vector3d from;
+      if (i == 0) {
+        from = Eigen::Vector3d(home_x, home_y, wp.up);
+      } else {
+        from = _world_waypoints[i - 1];
+      }
+      double dx = wp_world.x() - from.x();
+      double dy = wp_world.y() - from.y();
+      double auto_heading = std::atan2(dy, dx);
+      _waypoint_headings.push_back(auto_heading);
+    } else {
+      // Absolute heading from message (already in world frame)
+      _waypoint_headings.push_back(wp.heading);
+    }
+
+    RCLCPP_INFO(this->get_logger(),
+      "  WP%zu FLU(fwd=%.2f, left=%.2f, up=%.2f) -> world(%.2f, %.2f, %.2f) heading=%.1f deg",
+      i + 1, wp.forward, wp.left, wp.up,
+      wp_world.x(), wp_world.y(), wp_world.z(),
+      _waypoint_headings.back() * 180.0 / M_PI);
+  }
+}
+
+double PlannerNode::compute_heading_to_goal() const {
+  double dx = _goal_in_world_frame.x - _state.pose.position.x;
+  double dy = _goal_in_world_frame.y - _state.pose.position.y;
+  // ENU: yaw = atan2(dy, dx) → 0 = East, π/2 = North
+  // NWU: yaw = atan2(dy, dx) → 0 = North, π/2 = West
+  // Both use the same atan2(y_diff, x_diff) in their respective frames
+  return std::atan2(dy, dx);
+}
+
+void PlannerNode::log_mission_to_yaml(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr& msg) {
+  // Build YAML mission log
+  YAML::Emitter out;
+  out << YAML::BeginMap;
+  out << YAML::Key << "mission_name" << YAML::Value << msg->mission_name;
+  out << YAML::Key << "drone_id" << YAML::Value << static_cast<int>(opus_drone_id_);
+  out << YAML::Key << "timestamp" << YAML::Value << this->now().seconds();
+
+  // Initial position and heading at mission receive time
+  out << YAML::Key << "initial_position" << YAML::Value << YAML::BeginMap;
+  out << YAML::Key << "x" << YAML::Value << _home_in_world_frame.x;
+  out << YAML::Key << "y" << YAML::Value << _home_in_world_frame.y;
+  out << YAML::Key << "z" << YAML::Value << _home_in_world_frame.z;
+  out << YAML::EndMap;
+
+  double qw = _state.pose.orientation.w;
+  double qx = _state.pose.orientation.x;
+  double qy = _state.pose.orientation.y;
+  double qz = _state.pose.orientation.z;
+  double initial_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
+                                   1.0 - 2.0 * (qy * qy + qz * qz));
+  out << YAML::Key << "initial_yaw_rad" << YAML::Value << initial_yaw;
+  out << YAML::Key << "initial_yaw_deg" << YAML::Value << initial_yaw * 180.0 / M_PI;
+
+  out << YAML::Key << "loop_count" << YAML::Value << msg->loop_count;
+
+  // Original FLU waypoints (as received from GCS)
+  out << YAML::Key << "waypoints_flu" << YAML::Value << YAML::BeginSeq;
+  for (const auto& wp : msg->waypoints) {
+    out << YAML::BeginMap;
+    out << YAML::Key << "forward" << YAML::Value << wp.forward;
+    out << YAML::Key << "left" << YAML::Value << wp.left;
+    out << YAML::Key << "up" << YAML::Value << wp.up;
+    out << YAML::Key << "heading" << YAML::Value << wp.heading;
+    out << YAML::Key << "hold_time" << YAML::Value << wp.hold_time;
+    out << YAML::EndMap;
+  }
+  out << YAML::EndSeq;
+
+  // Computed world-frame waypoints (what the agent will actually navigate to)
+  out << YAML::Key << "waypoints_world" << YAML::Value << YAML::BeginSeq;
+  for (size_t i = 0; i < _world_waypoints.size(); i++) {
+    out << YAML::BeginMap;
+    out << YAML::Key << "x" << YAML::Value << _world_waypoints[i].x();
+    out << YAML::Key << "y" << YAML::Value << _world_waypoints[i].y();
+    out << YAML::Key << "z" << YAML::Value << _world_waypoints[i].z();
+    out << YAML::Key << "heading_rad" << YAML::Value << _waypoint_headings[i];
+    out << YAML::Key << "hold_time" << YAML::Value << _waypoint_hold_times[i];
+    out << YAML::EndMap;
+  }
+  out << YAML::EndSeq;
+  out << YAML::EndMap;
+
+  // Write to /tmp/mission_log_<drone_id>_<timestamp>.yaml
+  auto time_now = std::chrono::system_clock::now();
+  auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+    time_now.time_since_epoch()).count();
+  std::string filename = "/tmp/mission_log_drone" +
+    std::to_string(opus_drone_id_) + "_" + std::to_string(epoch) + ".yaml";
+
+  std::ofstream file(filename);
+  if (file.is_open()) {
+    file << out.c_str();
+    file.close();
+    RCLCPP_INFO(this->get_logger(), "Mission logged to %s", filename.c_str());
+  } else {
+    RCLCPP_WARN(this->get_logger(), "Failed to write mission log to %s", filename.c_str());
+  }
+}
+
 void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   const rclcpp::Time time_now = this->now();
 
@@ -1083,12 +1420,18 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
       _trial_start_time = time_now;  // Start benchmark timer
       _trial_started = true;
       break;
+    case PlanningStates::ALIGNING_HEADING:
+      state_name = "ALIGNING_HEADING";
+      break;
     case PlanningStates::TRAJECTORY_CONTROL:
       state_name = "TRAJECTORY_CONTROL";
       break;
     case PlanningStates::GO_TO_GOAL:
       state_name = "GO_TO_GOAL";
       benchmark_status = 1;  // GOAL_REACHED
+      break;
+    case PlanningStates::HOLDING_WAYPOINT:
+      state_name = "HOLDING_WAYPOINT";
       break;
     case PlanningStates::LAND:
       state_name = "LAND";
@@ -1285,6 +1628,17 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     // If waiting for grant
     if (!opus_granted_) {
       if (opus_queued_) {
+        // Queued at the coordinator — but guard against a lost grant message.
+        // If we've been queued longer than kOpusQueueTimeout_, clear the
+        // queued state and re-request so the coordinator can re-issue a grant.
+        auto q_elapsed = std::chrono::steady_clock::now() - opus_queue_time_;
+        if (std::chrono::duration<double>(q_elapsed).count() > kOpusQueueTimeout_) {
+          RCLCPP_WARN(this->get_logger(),
+            "OPUS: Queue timeout (%.1fs), re-requesting planning lock",
+            kOpusQueueTimeout_);
+          opus_queued_ = false;
+          opus_request_pending_ = false;
+        }
         return;  // Already queued at the coordinator, wait for the grant
       }
 
@@ -1392,6 +1746,7 @@ void PlannerNode::opus_plan_grant_callback(const ground_system_msgs::msg::OpusPl
     opus_queued_ = true;
     opus_request_pending_ = true;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
+    opus_queue_time_ = std::chrono::steady_clock::now();
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
       "OPUS: Queued at position %d", msg->queue_position);
   }
