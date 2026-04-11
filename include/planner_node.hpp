@@ -12,6 +12,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <opencv2/opencv.hpp>
 #include <random>
 #include <string>
@@ -341,10 +342,25 @@ class PlannerNode : public rclcpp::Node {
   bool opus_request_pending_ = false;
   bool opus_queued_ = false;          // Waiting in coordinator FIFO queue
   uint8_t opus_drone_id_ = 0;
+  uint32_t opus_session_id_ = 0;      // Monotonic session counter (incremented per request)
   std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
   ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting ACK
   std::mutex opus_mutex_;
   double opus_local_replan_timeout_ = 1.0;
+
+  // OPUS pre-queue: the latest locally planned trajectory waiting for OPUS submission.
+  // img_callback always plans locally and overwrites this. At replan time,
+  // update_reference_trajectory sets opus_submission_needed_ and the next
+  // img_callback picks this entry, checks it against the swarm, and
+  // submits to the GCS — only replanning if a collision is detected.
+  struct OpusPreQueueEntry {
+    ruckig::Trajectory<3> trajectory;
+    ruckig::InputParameter<3> input_camera_frame;
+    geometry_msgs::msg::TransformStamped body_to_world;
+    geometry_msgs::msg::Point world_position;
+  };
+  std::optional<OpusPreQueueEntry> opus_pre_queue_;
+  bool opus_submission_needed_ = false;  // Set at replan trigger, cleared on ACK
 
   // OPUS timeout tracking (monotonic clock)
   std::chrono::steady_clock::time_point opus_grant_time_{};
