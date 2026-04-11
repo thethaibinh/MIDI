@@ -8,6 +8,7 @@
 #include <boost/program_options.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <chrono>
 #include <ctime>
 #include <fstream>
 #include <iostream>
@@ -61,6 +62,7 @@
 
 // OPUS coordination messages
 #include <ground_system_msgs/msg/opus_plan_request.hpp>
+#include <ground_system_msgs/msg/opus_plan_abort.hpp>
 #include <ground_system_msgs/msg/opus_plan_grant.hpp>
 #include <ground_system_msgs/msg/opus_trajectory_submit.hpp>
 #include <ground_system_msgs/msg/opus_trajectory_ack.hpp>
@@ -224,6 +226,8 @@ class PlannerNode : public rclcpp::Node {
   void opus_plan_grant_callback(const ground_system_msgs::msg::OpusPlanGrant::SharedPtr msg);
   void opus_trajectory_ack_callback(const ground_system_msgs::msg::OpusTrajectoryAck::SharedPtr msg);
   void opus_request_planning_lock();
+  void opus_abort_planning(const std::string& reason);
+  bool opus_should_abort_replanning(double* elapsed_sec = nullptr);
   void opus_submit_trajectory(const ruckig::Trajectory<3>& traj,
                               const ruckig::InputParameter<3>& input,
                               const geometry_msgs::msg::TransformStamped& body_to_world,
@@ -295,6 +299,7 @@ class PlannerNode : public rclcpp::Node {
 
   // OPUS coordination
   rclcpp::Publisher<ground_system_msgs::msg::OpusPlanRequest>::SharedPtr opus_plan_request_pub_;
+  rclcpp::Publisher<ground_system_msgs::msg::OpusPlanAbort>::SharedPtr opus_plan_abort_pub_;
   rclcpp::Publisher<ground_system_msgs::msg::OpusTrajectorySubmit>::SharedPtr opus_trajectory_submit_pub_;
   rclcpp::Subscription<ground_system_msgs::msg::OpusPlanGrant>::SharedPtr opus_plan_grant_sub_;
   rclcpp::Subscription<ground_system_msgs::msg::OpusTrajectoryAck>::SharedPtr opus_trajectory_ack_sub_;
@@ -302,12 +307,15 @@ class PlannerNode : public rclcpp::Node {
   bool opus_granted_ = false;
   bool opus_ack_pending_ = false;     // Waiting for GCS ACK (execution permission)
   bool opus_request_pending_ = false;
+  bool opus_queued_ = false;          // Waiting in coordinator FIFO queue
   uint8_t opus_drone_id_ = 0;
   std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
   ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting ACK
   std::mutex opus_mutex_;
+  double opus_local_replan_timeout_ = 1.0;
 
   // OPUS timeout tracking (monotonic clock)
+  std::chrono::steady_clock::time_point opus_grant_time_{};
   std::chrono::steady_clock::time_point opus_request_time_{};
   std::chrono::steady_clock::time_point opus_submit_time_{};
   static constexpr double kOpusGrantTimeout_ = 5.0;  // seconds to wait for grant

@@ -6,6 +6,7 @@ bool PlannerNode::loadParameters() {
   // Declare and get parameters
   this->declare_parameter<std::string>("scenario", "sitl");
   this->declare_parameter<std::string>("planner_config_path", "");
+  this->declare_parameter<double>("opus_local_replan_timeout", 1.0);
   
   std::string scenario_str;
   if (!this->get_parameter("scenario", scenario_str)) {
@@ -29,6 +30,11 @@ bool PlannerNode::loadParameters() {
   }
 
   RCLCPP_INFO(this->get_logger(), "Loading planner config from: %s", planner_config_path.c_str());
+
+  if (!this->get_parameter("opus_local_replan_timeout", opus_local_replan_timeout_)) {
+    RCLCPP_ERROR(this->get_logger(), "Failed to get opus_local_replan_timeout parameter");
+    return false;
+  }
 
   // Load planner parameters
   YAML::Node planner_config;
@@ -192,6 +198,10 @@ bool PlannerNode::loadParameters() {
     _setpoint_type = SetpointTypes::POSITION_ONLY;
   else if (setpoint_type_str == "full")
     _setpoint_type = SetpointTypes::FULL_STATE;
+
+  RCLCPP_INFO(this->get_logger(),
+              "OPUS local replanning timeout: %.2fs (<=0 disables explicit abort)",
+              opus_local_replan_timeout_);
 
   RCLCPP_INFO(this->get_logger(), "Parameters loaded successfully");
   return true;
