@@ -18,6 +18,7 @@ find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(ground_system_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -80,6 +81,7 @@ endif()
 
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
+  rclcpp_action
   ament_index_cpp
   std_msgs
   sensor_msgs
@@ -107,6 +109,7 @@ target_link_libraries(midi_planner_node
 
 ament_target_dependencies(midi_planner_node
   rclcpp
+  rclcpp_action
 )
 
 # Install targets

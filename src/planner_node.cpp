@@ -165,22 +165,20 @@ PlannerNode::PlannerNode()
   opus_enabled_ = (opus_env == nullptr) || (std::string(opus_env) != "false");
 
   if (opus_enabled_) {
-    // Use RELIABLE QoS matching the coordinator for OPUS coordination messages
+    // Action client for lock acquisition (queuing + cancel support)
+    opus_lock_client_ = rclcpp_action::create_client<OpusPlanLockAction>(
+      this, "/opus/plan_lock");
+
+    // Service client for trajectory collision check
+    opus_traj_check_client_ = this->create_client<ground_system_msgs::srv::OpusTrajectoryCheck>(
+      "/opus/trajectory_check");
+
+    // Topic publisher for abort (release lock after grant, before service call)
     rclcpp::QoS opus_qos(10);
     opus_qos.reliable();
-
-    opus_plan_request_pub_ = this->create_publisher<ground_system_msgs::msg::OpusPlanRequest>(
-      "/opus/plan_request", opus_qos);
     opus_plan_abort_pub_ = this->create_publisher<ground_system_msgs::msg::OpusPlanAbort>(
       "/opus/plan_abort", opus_qos);
-    opus_trajectory_submit_pub_ = this->create_publisher<ground_system_msgs::msg::OpusTrajectorySubmit>(
-      "/opus/trajectory_submit", opus_qos);
-    opus_plan_grant_sub_ = this->create_subscription<ground_system_msgs::msg::OpusPlanGrant>(
-      "/opus/plan_grant", opus_qos,
-      std::bind(&PlannerNode::opus_plan_grant_callback, this, std::placeholders::_1));
-    opus_trajectory_ack_sub_ = this->create_subscription<ground_system_msgs::msg::OpusTrajectoryAck>(
-      "/opus/trajectory_ack", opus_qos,
-      std::bind(&PlannerNode::opus_trajectory_ack_callback, this, std::placeholders::_1));
+
     RCLCPP_INFO(this->get_logger(), "OPUS coordination enabled (drone_id=%d)", opus_drone_id_);
   } else {
     RCLCPP_INFO(this->get_logger(), "OPUS coordination disabled (solo mode)");
@@ -608,13 +606,17 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   if (opus_enabled_) {
     const std::lock_guard<std::mutex> olock(opus_mutex_);
     opus_granted_ = false;
-    opus_ack_pending_ = false;
-    opus_request_pending_ = false;
-    opus_queued_ = false;
+    opus_check_pending_ = false;
+    opus_lock_pending_ = false;
     opus_submission_needed_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_active_trajectories_.clear();
     opus_pre_queue_.reset();
+    // Cancel any in-flight action goal
+    if (opus_goal_handle_) {
+      opus_lock_client_->async_cancel_goal(opus_goal_handle_);
+      opus_goal_handle_ = nullptr;
+    }
   }
 }
 
@@ -697,7 +699,7 @@ void PlannerNode::update_reference_trajectory() {
       double point_time = trajectory_point_time.seconds();
       if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
-        if (!opus_ack_pending_) {
+        if (!opus_check_pending_) {
           opus_submission_needed_ = true;
           RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
             "OPUS: Replan trigger — requesting swarm coordination");
@@ -1631,67 +1633,26 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   ExplorationCost exploration_cost(goal_vector_camera_frame, _traveling_cost);
 
   // OPUS coordination: manage submission protocol (non-blocking).
-  // Unlike the old approach that gated ALL planning behind the OPUS lock,
-  // we now always plan locally (below) and only engage the OPUS protocol
+  // We always plan locally (below) and only engage the OPUS protocol
   // when opus_submission_needed_ is set by update_reference_trajectory().
-  bool opus_ready_to_submit = false;  // true when granted and ready to pick+submit
+  bool opus_ready_to_submit = false;
   if (opus_enabled_ && opus_submission_needed_) {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
 
-    // If waiting for ACK (trajectory submitted, awaiting execution permission)
-    if (opus_ack_pending_) {
-      auto elapsed = std::chrono::steady_clock::now() - opus_submit_time_;
-      if (std::chrono::duration<double>(elapsed).count() > kOpusAckTimeout_) {
-        RCLCPP_WARN(this->get_logger(),
-          "OPUS: ACK timeout (%.1fs), sending abort and re-requesting",
-          kOpusAckTimeout_);
-        // Publish abort so coordinator releases the lock
-        auto abort_msg = ground_system_msgs::msg::OpusPlanAbort();
-        abort_msg.header.stamp = this->now();
-        abort_msg.drone_id = opus_drone_id_;
-        abort_msg.session_id = opus_session_id_;
-        abort_msg.reason = "ACK timeout";
-        opus_plan_abort_pub_->publish(abort_msg);
-
-        opus_ack_pending_ = false;
-        opus_granted_ = false;
-        opus_request_pending_ = false;
-        // Will re-request on the next cycle (submission_needed stays true)
-      }
-      // Still waiting — but plan locally below (don't return)
+    // If waiting for TrajectoryCheck service response — just plan locally
+    if (opus_check_pending_) {
+      // Still waiting — plan locally below (don't return)
     }
-
-    // If not waiting for ACK, check grant state
-    if (!opus_ack_pending_ && !opus_granted_) {
-      if (opus_queued_) {
-        auto q_elapsed = std::chrono::steady_clock::now() - opus_queue_time_;
-        if (std::chrono::duration<double>(q_elapsed).count() > kOpusQueueTimeout_) {
-          RCLCPP_WARN(this->get_logger(),
-            "OPUS: Queue timeout (%.1fs), re-requesting planning lock",
-            kOpusQueueTimeout_);
-          opus_queued_ = false;
-          opus_request_pending_ = false;
-        }
-        // Queued — plan locally below
-      } else if (!opus_request_pending_) {
-        opus_request_planning_lock();
-        opus_request_pending_ = true;
-        opus_request_time_ = std::chrono::steady_clock::now();
-      } else {
-        auto elapsed = std::chrono::steady_clock::now() - opus_request_time_;
-        if (std::chrono::duration<double>(elapsed).count() > kOpusGrantTimeout_) {
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-            "OPUS: Grant timeout (%.1fs), re-requesting", kOpusGrantTimeout_);
-          opus_request_pending_ = false;  // Will re-request next cycle
-        }
-      }
-      // Waiting for grant — plan locally below
-    }
-
-    // Check if we're granted and ready to submit
-    if (!opus_ack_pending_ && opus_granted_) {
+    // If lock granted and not waiting for check — ready to submit
+    else if (opus_granted_) {
       opus_ready_to_submit = true;
     }
+    // If lock not requested yet — send action goal
+    else if (!opus_lock_pending_) {
+      opus_send_lock_goal();
+      // Plan locally below while waiting for lock
+    }
+    // Lock pending (action goal in flight) — plan locally below
   }
 
   // OPUS fast-path: if granted, try submitting the latest pre-queued
@@ -1714,30 +1675,28 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       if (is_trajectory_safe_against_swarm(fast_entry.trajectory, fast_entry.input_camera_frame,
             this->now(), fast_entry.body_to_world, fast_entry.world_position, active_trajs)) {
         RCLCPP_INFO(this->get_logger(),
-          "OPUS: Pre-queued trajectory is swarm-safe, submitting directly");
+          "OPUS: Pre-queued trajectory is swarm-safe, submitting via service");
         opus_submit_trajectory(fast_entry.trajectory, fast_entry.input_camera_frame,
                                fast_entry.body_to_world, fast_entry.world_position);
         {
           std::lock_guard<std::mutex> olock(opus_mutex_);
           opus_pending_trajectory_ = fast_entry.trajectory;
-          opus_ack_pending_ = true;
-          opus_submit_time_ = std::chrono::steady_clock::now();
+          opus_check_pending_ = true;
           opus_submission_needed_ = false;
           opus_pre_queue_.reset();
         }
-        return;  // Submitted from pre-queue, wait for ACK
+        return;  // Submitted via service, wait for response
       }
       // Pre-queued trajectory collides with swarm — fall through to
-      // plan fresh with current depth data (the swarm state or our
-      // position may have changed enough to find a safe trajectory)
+      // plan fresh with current depth data
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
         "OPUS: Pre-queued trajectory collides with swarm, planning fresh");
       {
         std::lock_guard<std::mutex> olock(opus_mutex_);
-        opus_pre_queue_.reset();  // Discard stale pre-queue entry
+        opus_pre_queue_.reset();
       }
     }
-    // Pre-queue empty or all collided — plan fresh below, then submit
+    // Pre-queue empty or collided — plan fresh below, then submit
   }
 
   if (!planner.find_lowest_cost_trajectory(
@@ -1785,17 +1744,16 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
         return;
       }
 
-      // Safe! Submit to GCS; ACK callback will push to trajectory_queue_
+      // Safe! Submit via service; response callback will push to trajectory_queue_
       opus_submit_trajectory(opt_traj, initial_state_camera_frame, body_to_world, position_world_frame);
       {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_pending_trajectory_ = opt_traj;
-        opus_ack_pending_ = true;
-        opus_submit_time_ = std::chrono::steady_clock::now();
+        opus_check_pending_ = true;
         opus_submission_needed_ = false;
         opus_pre_queue_.reset();
       }
-      return;  // Wait for ACK (execution permission) before pushing to queue
+      return;  // Wait for service response before pushing to queue
     }
 
     // Not in submission mode — overwrite pre-queue with latest trajectory
@@ -1819,89 +1777,106 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 // OPUS Coordination Functions
 // ============================================================================
 
-void PlannerNode::opus_plan_grant_callback(const ground_system_msgs::msg::OpusPlanGrant::SharedPtr msg) {
-  if (msg->drone_id != opus_drone_id_) return;
+// ---- OPUS Action Client Callbacks ----
 
-  const std::lock_guard<std::mutex> lock(opus_mutex_);
-
-  // Reject stale grants from a previous session
-  if (msg->session_id != opus_session_id_) {
-    RCLCPP_WARN(this->get_logger(),
-      "OPUS: Ignoring stale grant (session %u, current %u)",
-      msg->session_id, opus_session_id_);
+void PlannerNode::opus_send_lock_goal() {
+  if (!opus_lock_client_->wait_for_action_server(std::chrono::milliseconds(100))) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+      "OPUS: Action server not available, will retry");
     return;
   }
 
-  if (msg->permitted) {
+  auto goal_msg = OpusPlanLockAction::Goal();
+  goal_msg.drone_id = opus_drone_id_;
+
+  auto send_goal_options = rclcpp_action::Client<OpusPlanLockAction>::SendGoalOptions();
+  send_goal_options.goal_response_callback =
+    std::bind(&PlannerNode::opus_lock_goal_response_callback, this, std::placeholders::_1);
+  send_goal_options.feedback_callback =
+    std::bind(&PlannerNode::opus_lock_feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
+  send_goal_options.result_callback =
+    std::bind(&PlannerNode::opus_lock_result_callback, this, std::placeholders::_1);
+
+  opus_lock_client_->async_send_goal(goal_msg, send_goal_options);
+  opus_lock_pending_ = true;
+  RCLCPP_INFO(this->get_logger(), "OPUS: Sent lock goal (drone_id=%d)", opus_drone_id_);
+}
+
+void PlannerNode::opus_lock_goal_response_callback(
+    const OpusPlanLockGoalHandle::SharedPtr& goal_handle) {
+  const std::lock_guard<std::mutex> lock(opus_mutex_);
+  if (!goal_handle) {
+    RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal was rejected by coordinator");
+    opus_lock_pending_ = false;
+    return;
+  }
+  opus_goal_handle_ = goal_handle;
+  RCLCPP_INFO(this->get_logger(), "OPUS: Lock goal accepted, waiting for grant");
+}
+
+void PlannerNode::opus_lock_feedback_callback(
+    OpusPlanLockGoalHandle::SharedPtr,
+    const std::shared_ptr<const OpusPlanLockAction::Feedback> feedback) {
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    "OPUS: Queued at position %d", feedback->queue_position);
+}
+
+void PlannerNode::opus_lock_result_callback(
+    const OpusPlanLockGoalHandle::WrappedResult& wrapped_result) {
+  const std::lock_guard<std::mutex> lock(opus_mutex_);
+  opus_lock_pending_ = false;
+  opus_goal_handle_ = nullptr;
+
+  if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED &&
+      wrapped_result.result->permitted) {
     opus_granted_ = true;
-    opus_ack_pending_ = false;
-    opus_queued_ = false;
-    opus_request_pending_ = false;
     opus_grant_time_ = std::chrono::steady_clock::now();
     opus_active_trajectories_.assign(
-      msg->active_trajectories.begin(), msg->active_trajectories.end());
+      wrapped_result.result->active_trajectories.begin(),
+      wrapped_result.result->active_trajectories.end());
     RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (%zu active trajectories)",
                 opus_active_trajectories_.size());
   } else {
     opus_granted_ = false;
-    opus_queued_ = true;
-    opus_request_pending_ = true;
-    opus_grant_time_ = std::chrono::steady_clock::time_point{};
-    opus_queue_time_ = std::chrono::steady_clock::now();
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-      "OPUS: Queued at position %d", msg->queue_position);
+    const char* reason = "unknown";
+    switch (wrapped_result.code) {
+      case rclcpp_action::ResultCode::CANCELED: reason = "cancelled"; break;
+      case rclcpp_action::ResultCode::ABORTED:  reason = "aborted"; break;
+      default: break;
+    }
+    RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal not granted (%s)", reason);
   }
 }
 
-void PlannerNode::opus_trajectory_ack_callback(const ground_system_msgs::msg::OpusTrajectoryAck::SharedPtr msg) {
-  if (msg->drone_id != opus_drone_id_) return;
+// ---- OPUS Service Response Callback ----
 
+void PlannerNode::opus_trajectory_check_response(
+    rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future) {
+  auto response = future.get();
   const std::lock_guard<std::mutex> olock(opus_mutex_);
-  if (!opus_ack_pending_) return;  // Stale/unexpected ACK
-
-  // Reject stale ACKs from a previous session
-  if (msg->session_id != opus_session_id_) {
-    RCLCPP_WARN(this->get_logger(),
-      "OPUS: Ignoring stale ACK (session %u, current %u)",
-      msg->session_id, opus_session_id_);
-    return;
-  }
-
-  opus_ack_pending_ = false;
+  opus_check_pending_ = false;
   opus_granted_ = false;
-  opus_queued_ = false;
-  opus_request_pending_ = false;
   opus_grant_time_ = std::chrono::steady_clock::time_point{};
+  opus_active_trajectories_.clear();
 
-  if (msg->accepted) {
+  if (response->accepted) {
     RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED — executing");
-    // ACK = execution permission: push pending trajectory to queue
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.push_back(opus_pending_trajectory_);
   } else {
     RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s — will re-plan",
-                msg->reason.c_str());
-    // Re-trigger submission so next img_callback tries again
+                response->reason.c_str());
     opus_submission_needed_ = true;
   }
 }
 
-void PlannerNode::opus_request_planning_lock() {
-  ++opus_session_id_;
-  auto msg = ground_system_msgs::msg::OpusPlanRequest();
-  msg.header.stamp = this->now();
-  msg.drone_id = opus_drone_id_;
-  msg.session_id = opus_session_id_;
-  opus_plan_request_pub_->publish(msg);
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "OPUS: Requesting planning lock (drone_id=%d, session=%u)", opus_drone_id_, opus_session_id_);
-}
+// ---- OPUS Helpers ----
 
 bool PlannerNode::opus_should_abort_replanning(double* elapsed_sec) {
   const std::lock_guard<std::mutex> lock(opus_mutex_);
-  if (!opus_enabled_ || !opus_granted_ || opus_ack_pending_ || opus_queued_ ||
+  if (!opus_enabled_ || !opus_granted_ || opus_check_pending_ ||
       opus_local_replan_timeout_ <= 0.0) {
     return false;
   }
@@ -1919,7 +1894,7 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
   double elapsed = 0.0;
   {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
-    if (!opus_enabled_ || !(opus_granted_ || opus_queued_ || opus_request_pending_)) {
+    if (!opus_enabled_ || !(opus_granted_ || opus_lock_pending_)) {
       return;
     }
 
@@ -1928,20 +1903,25 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
         std::chrono::steady_clock::now() - opus_grant_time_).count();
     }
 
+    // Cancel in-flight action goal (handles queue-phase abort)
+    if (opus_goal_handle_) {
+      opus_lock_client_->async_cancel_goal(opus_goal_handle_);
+      opus_goal_handle_ = nullptr;
+    }
+
     opus_granted_ = false;
-    opus_ack_pending_ = false;
-    opus_request_pending_ = false;
-    opus_queued_ = false;
+    opus_check_pending_ = false;
+    opus_lock_pending_ = false;
     opus_submission_needed_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_active_trajectories_.clear();
     opus_pre_queue_.reset();
   }
 
+  // Publish abort topic (for post-grant abort when coordinator has already released the action)
   auto msg = ground_system_msgs::msg::OpusPlanAbort();
   msg.header.stamp = this->now();
   msg.drone_id = opus_drone_id_;
-  msg.session_id = opus_session_id_;
   msg.reason = reason;
   opus_plan_abort_pub_->publish(msg);
 
@@ -2060,11 +2040,11 @@ void PlannerNode::opus_submit_trajectory(
   msg.start_time = this->now().seconds();
   msg.duration = traj.get_duration();
 
-  auto submit_msg = ground_system_msgs::msg::OpusTrajectorySubmit();
-  submit_msg.header.stamp = this->now();
-  submit_msg.session_id = opus_session_id_;
-  submit_msg.trajectory = msg;
-  opus_trajectory_submit_pub_->publish(submit_msg);
+  auto request = std::make_shared<ground_system_msgs::srv::OpusTrajectoryCheck::Request>();
+  request->drone_id = opus_drone_id_;
+  request->trajectory = msg;
+  opus_traj_check_client_->async_send_request(request,
+    std::bind(&PlannerNode::opus_trajectory_check_response, this, std::placeholders::_1));
 
   RCLCPP_INFO(this->get_logger(),
     "OPUS: Submitted trajectory (world: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f], dur=%.2fs)",

@@ -30,6 +30,9 @@
   <!-- Ground system messages -->
   <depend>ground_system_msgs</depend>
   
+  <!-- ROS2 action client -->
+  <depend>rclcpp_action</depend>
+  
   <!-- PCL -->
   <depend>pcl_conversions</depend>
   

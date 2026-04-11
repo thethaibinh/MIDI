@@ -63,12 +63,11 @@
 #include <ground_system_msgs/msg/takeoff.hpp>
 #include <ground_system_msgs/msg/fly_to.hpp>
 
-// OPUS coordination messages
-#include <ground_system_msgs/msg/opus_plan_request.hpp>
+// OPUS coordination (action + service + topic)
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <ground_system_msgs/action/opus_plan_lock.hpp>
+#include <ground_system_msgs/srv/opus_trajectory_check.hpp>
 #include <ground_system_msgs/msg/opus_plan_abort.hpp>
-#include <ground_system_msgs/msg/opus_plan_grant.hpp>
-#include <ground_system_msgs/msg/opus_trajectory_submit.hpp>
-#include <ground_system_msgs/msg/opus_trajectory_ack.hpp>
 #include <ground_system_msgs/msg/ruckig_trajectory.hpp>
 #include <ground_system_msgs/msg/waypoint.hpp>
 
@@ -231,15 +230,22 @@ class PlannerNode : public rclcpp::Node {
   void publish_benchmark_status(uint8_t status);
 
   // OPUS coordination helpers
-  void opus_plan_grant_callback(const ground_system_msgs::msg::OpusPlanGrant::SharedPtr msg);
-  void opus_trajectory_ack_callback(const ground_system_msgs::msg::OpusTrajectoryAck::SharedPtr msg);
-  void opus_request_planning_lock();
+  using OpusPlanLockAction = ground_system_msgs::action::OpusPlanLock;
+  using OpusPlanLockGoalHandle = rclcpp_action::ClientGoalHandle<OpusPlanLockAction>;
+  void opus_send_lock_goal();
+  void opus_lock_goal_response_callback(const OpusPlanLockGoalHandle::SharedPtr& goal_handle);
+  void opus_lock_feedback_callback(
+      OpusPlanLockGoalHandle::SharedPtr,
+      const std::shared_ptr<const OpusPlanLockAction::Feedback> feedback);
+  void opus_lock_result_callback(const OpusPlanLockGoalHandle::WrappedResult& result);
   void opus_abort_planning(const std::string& reason);
   bool opus_should_abort_replanning(double* elapsed_sec = nullptr);
   void opus_submit_trajectory(const ruckig::Trajectory<3>& traj,
                               const ruckig::InputParameter<3>& input,
                               const geometry_msgs::msg::TransformStamped& body_to_world,
                               const geometry_msgs::msg::Point& world_position);
+  void opus_trajectory_check_response(
+      rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future);
   bool is_trajectory_safe_against_swarm(
       const ruckig::Trajectory<3>& planned_traj,
       const ruckig::InputParameter<3>& input_camera_frame,
@@ -330,21 +336,18 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
   static constexpr double kOdomThrottleInterval_ = 0.1;  // 10 Hz
 
-  // OPUS coordination
-  rclcpp::Publisher<ground_system_msgs::msg::OpusPlanRequest>::SharedPtr opus_plan_request_pub_;
+  // OPUS coordination (action client + service client + abort topic)
+  rclcpp_action::Client<OpusPlanLockAction>::SharedPtr opus_lock_client_;
+  rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedPtr opus_traj_check_client_;
   rclcpp::Publisher<ground_system_msgs::msg::OpusPlanAbort>::SharedPtr opus_plan_abort_pub_;
-  rclcpp::Publisher<ground_system_msgs::msg::OpusTrajectorySubmit>::SharedPtr opus_trajectory_submit_pub_;
-  rclcpp::Subscription<ground_system_msgs::msg::OpusPlanGrant>::SharedPtr opus_plan_grant_sub_;
-  rclcpp::Subscription<ground_system_msgs::msg::OpusTrajectoryAck>::SharedPtr opus_trajectory_ack_sub_;
+  OpusPlanLockGoalHandle::SharedPtr opus_goal_handle_;  // Active lock goal (nullptr if none)
   bool opus_enabled_ = false;
-  bool opus_granted_ = false;
-  bool opus_ack_pending_ = false;     // Waiting for GCS ACK (execution permission)
-  bool opus_request_pending_ = false;
-  bool opus_queued_ = false;          // Waiting in coordinator FIFO queue
+  bool opus_granted_ = false;          // Lock granted by coordinator
+  bool opus_check_pending_ = false;    // Waiting for TrajectoryCheck service response
+  bool opus_lock_pending_ = false;     // Lock goal sent, waiting for grant result
   uint8_t opus_drone_id_ = 0;
-  uint32_t opus_session_id_ = 0;      // Monotonic session counter (incremented per request)
   std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
-  ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting ACK
+  ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting check response
   std::mutex opus_mutex_;
   double opus_local_replan_timeout_ = 1.0;
 
@@ -360,16 +363,11 @@ class PlannerNode : public rclcpp::Node {
     geometry_msgs::msg::Point world_position;
   };
   std::optional<OpusPreQueueEntry> opus_pre_queue_;
-  bool opus_submission_needed_ = false;  // Set at replan trigger, cleared on ACK
+  bool opus_submission_needed_ = false;  // Set at replan trigger, cleared on check response
 
   // OPUS timeout tracking (monotonic clock)
   std::chrono::steady_clock::time_point opus_grant_time_{};
-  std::chrono::steady_clock::time_point opus_request_time_{};
-  std::chrono::steady_clock::time_point opus_submit_time_{};
-  std::chrono::steady_clock::time_point opus_queue_time_{};
-  static constexpr double kOpusGrantTimeout_ = 5.0;   // seconds to wait for initial grant
-  static constexpr double kOpusAckTimeout_ = 3.0;     // seconds to wait for ACK
-  static constexpr double kOpusQueueTimeout_ = 10.0;  // seconds to wait while queued before re-requesting
+  static constexpr double kOpusLocalReplanTimeout_ = 5.0;  // seconds before aborting local replanning
 };
 
 #endif  // PLANNER_NODE_HPP
