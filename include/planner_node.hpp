@@ -3,6 +3,7 @@
 
 #pragma once
 #include <unistd.h>
+#include <cstdlib>
 
 #include <boost/program_options.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -57,6 +58,13 @@
 #include <ground_system_msgs/msg/benchmark_status.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
 #include <ground_system_msgs/msg/fly_to.hpp>
+
+// OPUS coordination messages
+#include <ground_system_msgs/msg/opus_plan_request.hpp>
+#include <ground_system_msgs/msg/opus_plan_grant.hpp>
+#include <ground_system_msgs/msg/opus_trajectory_submit.hpp>
+#include <ground_system_msgs/msg/opus_trajectory_ack.hpp>
+#include <ground_system_msgs/msg/ruckig_trajectory.hpp>
 
 // CV
 #include <cv_bridge/cv_bridge.h>
@@ -212,6 +220,32 @@ class PlannerNode : public rclcpp::Node {
   // Benchmark helpers
   void publish_benchmark_status(uint8_t status);
 
+  // OPUS coordination helpers
+  void opus_plan_grant_callback(const ground_system_msgs::msg::OpusPlanGrant::SharedPtr msg);
+  void opus_trajectory_ack_callback(const ground_system_msgs::msg::OpusTrajectoryAck::SharedPtr msg);
+  void opus_request_planning_lock();
+  void opus_submit_trajectory(const ruckig::Trajectory<3>& traj,
+                              const ruckig::InputParameter<3>& input,
+                              const geometry_msgs::msg::TransformStamped& body_to_world,
+                              const geometry_msgs::msg::Point& world_position);
+  bool is_trajectory_safe_against_swarm(
+      const ruckig::Trajectory<3>& planned_traj,
+      const ruckig::InputParameter<3>& input_camera_frame,
+      const rclcpp::Time& planned_start_time,
+      const geometry_msgs::msg::TransformStamped& body_to_world,
+      const geometry_msgs::msg::Point& world_position,
+      const std::vector<ground_system_msgs::msg::RuckigTrajectory>& active_trajectories);
+  ground_system_msgs::msg::RuckigTrajectory ruckig_input_to_msg(
+      const ruckig::InputParameter<3>& input, double start_time, double duration);
+  // Transform vector from camera frame (RDF) to world frame (ENU)
+  // For positions: applies rotation + translation (current world position)
+  // For velocity/accel: applies rotation only
+  Eigen::Vector3d transform_camera_to_world(
+      const Eigen::Vector3d& camera_vec,
+      const geometry_msgs::msg::TransformStamped& body_to_world,
+      bool is_position,
+      const geometry_msgs::msg::Point& world_position);
+
   // Constants
   static constexpr double kPositionJumpTolerance_ = 0.5;
   RuntimeModes _runtime_mode;
@@ -258,6 +292,26 @@ class PlannerNode : public rclcpp::Node {
   // Odom throttle for zenoh (100Hz -> 10Hz)
   rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
   static constexpr double kOdomThrottleInterval_ = 0.1;  // 10 Hz
+
+  // OPUS coordination
+  rclcpp::Publisher<ground_system_msgs::msg::OpusPlanRequest>::SharedPtr opus_plan_request_pub_;
+  rclcpp::Publisher<ground_system_msgs::msg::OpusTrajectorySubmit>::SharedPtr opus_trajectory_submit_pub_;
+  rclcpp::Subscription<ground_system_msgs::msg::OpusPlanGrant>::SharedPtr opus_plan_grant_sub_;
+  rclcpp::Subscription<ground_system_msgs::msg::OpusTrajectoryAck>::SharedPtr opus_trajectory_ack_sub_;
+  bool opus_enabled_ = false;
+  bool opus_granted_ = false;
+  bool opus_ack_pending_ = false;     // Waiting for GCS ACK (execution permission)
+  bool opus_request_pending_ = false;
+  uint8_t opus_drone_id_ = 0;
+  std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
+  ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting ACK
+  std::mutex opus_mutex_;
+
+  // OPUS timeout tracking (monotonic clock)
+  std::chrono::steady_clock::time_point opus_request_time_{};
+  std::chrono::steady_clock::time_point opus_submit_time_{};
+  static constexpr double kOpusGrantTimeout_ = 5.0;  // seconds to wait for grant
+  static constexpr double kOpusAckTimeout_ = 3.0;    // seconds to wait for ACK
 };
 
 #endif  // PLANNER_NODE_HPP

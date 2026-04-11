@@ -6,6 +6,7 @@ enum class PlanningStates {
   OFF,
   TAKING_OFF,
   TRAJECTORY_CONTROL,
+  WAITING_FOR_OPUS,
   GO_TO_GOAL,
   LAND,
   FINISHED
