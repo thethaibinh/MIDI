@@ -12,6 +12,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <atomic>
 #include <optional>
 #include <opencv2/opencv.hpp>
 #include <random>
@@ -68,7 +69,8 @@
 #include <ground_system_msgs/action/opus_plan_lock.hpp>
 #include <ground_system_msgs/srv/opus_trajectory_check.hpp>
 #include <ground_system_msgs/msg/opus_plan_abort.hpp>
-#include <ground_system_msgs/msg/ruckig_trajectory.hpp>
+#include <ground_system_msgs/msg/opus_trajectory.hpp>
+#include <ground_system_msgs/msg/opus_phase_segment.hpp>
 #include <ground_system_msgs/msg/waypoint.hpp>
 
 // CV
@@ -176,7 +178,7 @@ class PlannerNode : public rclcpp::Node {
   // Autopilot
   ruckig::Trajectory<3> reference_trajectory_;
   bool had_reference_trajectory, _goal_set;
-  PlanningStates _planner_state;
+  std::atomic<PlanningStates> _planner_state;
   Eigen::Vector3d targetPos_, targetVel_, targetAcc_, targetJerk_, targetSnap_, targetPos_prev_, targetVel_prev_;
   Eigen::Vector3d mavPos_, mavVel_, mavRate_;
 
@@ -240,21 +242,11 @@ class PlannerNode : public rclcpp::Node {
   void opus_abort_planning(const std::string& reason);
   bool opus_should_abort_replanning(double* elapsed_sec = nullptr);
   void opus_submit_trajectory(const ruckig::Trajectory<3>& traj,
-                              const ruckig::InputParameter<3>& input,
                               const geometry_msgs::msg::TransformStamped& body_to_world,
                               const geometry_msgs::msg::Point& world_position);
   void opus_trajectory_check_response(
       rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future,
       uint32_t expected_seq);
-  bool is_trajectory_safe_against_swarm(
-      const ruckig::Trajectory<3>& planned_traj,
-      const ruckig::InputParameter<3>& input_camera_frame,
-      const rclcpp::Time& planned_start_time,
-      const geometry_msgs::msg::TransformStamped& body_to_world,
-      const geometry_msgs::msg::Point& world_position,
-      const std::vector<ground_system_msgs::msg::RuckigTrajectory>& active_trajectories);
-  ground_system_msgs::msg::RuckigTrajectory ruckig_input_to_msg(
-      const ruckig::InputParameter<3>& input, double start_time, double duration);
   // Transform vector from camera frame (RDF) to world frame (ENU)
   // For positions: applies rotation + translation (current world position)
   // For velocity/accel: applies rotation only
@@ -347,7 +339,6 @@ class PlannerNode : public rclcpp::Node {
   bool opus_lock_pending_ = false;     // Lock goal sent, waiting for grant result
   uint8_t opus_drone_id_ = 0;
   uint32_t opus_plan_sequence_ = 0;    // Monotonic counter for correlating lock/check/abort
-  std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
   ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting check response
   std::mutex opus_mutex_;
   double opus_local_replan_timeout_ = kOpusLocalReplanTimeout_;
@@ -355,11 +346,10 @@ class PlannerNode : public rclcpp::Node {
   // OPUS pre-queue: the latest locally planned trajectory waiting for OPUS submission.
   // img_callback always plans locally and overwrites this. At replan time,
   // update_reference_trajectory sets opus_submission_needed_ and the next
-  // img_callback picks this entry, checks it against the swarm, and
-  // submits to the GCS — only replanning if a collision is detected.
+  // img_callback picks this entry and submits to the GCS (collision check is
+  // done by the coordinator).
   struct OpusPreQueueEntry {
     ruckig::Trajectory<3> trajectory;
-    ruckig::InputParameter<3> input_camera_frame;
     geometry_msgs::msg::TransformStamped body_to_world;
     geometry_msgs::msg::Point world_position;
   };

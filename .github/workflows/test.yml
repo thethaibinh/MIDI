@@ -1,0 +1,37 @@
+name: Math Library Tests
+
+on:
+  push:
+    branches: [main, master, opus-ros2-actions]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            cmake g++ libeigen3-dev libgtest-dev \
+            ros-humble-geometry-msgs
+          # Build GTest libraries (Ubuntu ships sources only)
+          cd /usr/src/googletest && cmake . && cmake --build . --target install
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          . /opt/ros/humble/setup.sh
+          cmake -S .github/test-cmake -B build -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: cd build && ctest --output-on-failure

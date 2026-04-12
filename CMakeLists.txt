@@ -157,4 +157,28 @@ ament_export_dependencies(
   pcl_conversions
 )
 
+# ============================================================================
+# Tests (header-only math library — minimal deps, no midi library linkage)
+# ============================================================================
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  # Test: polynomial root-finding (polynomial2/3/4)
+  ament_add_gtest(test_polynomials test/test_polynomials.cpp)
+  target_include_directories(test_polynomials PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  # Test: segment distance functions (segment2/3)
+  ament_add_gtest(test_segments test/test_segments.cpp)
+  target_include_directories(test_segments PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  # Test: frame transforms, Eigen/ROS conversions, common.hpp helpers
+  ament_add_gtest(test_frame_transforms test/test_frame_transforms.cpp)
+  target_include_directories(test_frame_transforms PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+  ament_target_dependencies(test_frame_transforms geometry_msgs)
+
+  # Test: trajectory cost function
+  ament_add_gtest(test_trajectory_cost test/test_trajectory_cost.cpp)
+  target_include_directories(test_trajectory_cost PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+endif()
+
 ament_package()

@@ -610,7 +610,6 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
     opus_lock_pending_ = false;
     opus_submission_needed_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
-    opus_active_trajectories_.clear();
     opus_pre_queue_.reset();
     opus_pending_trajectory_ = ruckig::Trajectory<3>();  // Clear stale trajectory
     // Bump sequence so any in-flight goal-response / service-response callbacks
@@ -1444,11 +1443,11 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
     trajectory_queue_.clear();
   }
   time_of_switch_to_current_state_ = time_now;
-  _planner_state = new_state;
+  _planner_state.store(new_state, std::memory_order_release);
 
   std::string state_name;
   uint8_t benchmark_status = 0;  // IN_PROGRESS
-  switch (_planner_state) {
+  switch (new_state) {
     case PlanningStates::OFF:
       state_name = "OFF";
       break;
@@ -1669,47 +1668,33 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   }
 
   // OPUS fast-path: if granted, try submitting the latest pre-queued
-  // trajectory directly (no fresh planning needed).
+  // trajectory directly (no fresh planning needed — GCS does collision check).
   if (opus_ready_to_submit) {
     OpusPreQueueEntry fast_entry;
     bool have_entry = false;
-    std::vector<ground_system_msgs::msg::RuckigTrajectory> active_trajs;
     {
       std::lock_guard<std::mutex> olock(opus_mutex_);
       if (opus_pre_queue_.has_value()) {
         fast_entry = opus_pre_queue_.value();
         have_entry = true;
-        active_trajs = opus_active_trajectories_;
       }
     }
 
     if (have_entry) {
-      // Swarm check outside the lock (may be expensive)
-      if (is_trajectory_safe_against_swarm(fast_entry.trajectory, fast_entry.input_camera_frame,
-            this->now(), fast_entry.body_to_world, fast_entry.world_position, active_trajs)) {
-        RCLCPP_INFO(this->get_logger(),
-          "OPUS: Pre-queued trajectory is swarm-safe, submitting via service");
-        opus_submit_trajectory(fast_entry.trajectory, fast_entry.input_camera_frame,
-                               fast_entry.body_to_world, fast_entry.world_position);
-        {
-          std::lock_guard<std::mutex> olock(opus_mutex_);
-          opus_pending_trajectory_ = fast_entry.trajectory;
-          opus_check_pending_ = true;
-          opus_submission_needed_ = false;
-          opus_pre_queue_.reset();
-        }
-        return;  // Submitted via service, wait for response
-      }
-      // Pre-queued trajectory collides with swarm — fall through to
-      // plan fresh with current depth data
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-        "OPUS: Pre-queued trajectory collides with swarm, planning fresh");
+      RCLCPP_INFO(this->get_logger(),
+        "OPUS: Submitting pre-queued trajectory via service (GCS collision check)");
+      opus_submit_trajectory(fast_entry.trajectory,
+                             fast_entry.body_to_world, fast_entry.world_position);
       {
         std::lock_guard<std::mutex> olock(opus_mutex_);
+        opus_pending_trajectory_ = fast_entry.trajectory;
+        opus_check_pending_ = true;
+        opus_submission_needed_ = false;
         opus_pre_queue_.reset();
       }
+      return;  // Submitted via service, wait for response
     }
-    // Pre-queue empty or collided — plan fresh below, then submit
+    // Pre-queue empty — plan fresh below, then submit
   }
 
   if (!planner.find_lowest_cost_trajectory(
@@ -1739,26 +1724,8 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 
   if (opus_enabled_) {
     if (opus_ready_to_submit) {
-      // We're granted and need to submit — check fresh trajectory against swarm
-      std::vector<ground_system_msgs::msg::RuckigTrajectory> active_trajs;
-      {
-        const std::lock_guard<std::mutex> olock(opus_mutex_);
-        active_trajs = opus_active_trajectories_;
-      }
-
-      if (!is_trajectory_safe_against_swarm(opt_traj, initial_state_camera_frame,
-            this->now(), body_to_world, position_world_frame, active_trajs)) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-          "OPUS: Fresh trajectory collides with swarm, will retry next frame");
-        if (opus_should_abort_replanning()) {
-          opus_abort_planning(
-            "No swarm-safe trajectory found within local OPUS replanning timeout");
-        }
-        return;
-      }
-
-      // Safe! Submit via service; response callback will push to trajectory_queue_
-      opus_submit_trajectory(opt_traj, initial_state_camera_frame, body_to_world, position_world_frame);
+      // Submit directly — GCS performs collision check
+      opus_submit_trajectory(opt_traj, body_to_world, position_world_frame);
       {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_pending_trajectory_ = opt_traj;
@@ -1772,7 +1739,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     // Not in submission mode — overwrite pre-queue with latest trajectory
     {
       const std::lock_guard<std::mutex> olock(opus_mutex_);
-      opus_pre_queue_ = OpusPreQueueEntry{opt_traj, initial_state_camera_frame, body_to_world, position_world_frame};
+      opus_pre_queue_ = OpusPreQueueEntry{opt_traj, body_to_world, position_world_frame};
     }
     return;
   }
@@ -1865,11 +1832,8 @@ void PlannerNode::opus_lock_result_callback(
     }
     opus_granted_ = true;
     opus_grant_time_ = std::chrono::steady_clock::now();
-    opus_active_trajectories_.assign(
-      wrapped_result.result->active_trajectories.begin(),
-      wrapped_result.result->active_trajectories.end());
-    RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (seq=%u, %zu active trajectories)",
-                opus_plan_sequence_, opus_active_trajectories_.size());
+    RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (seq=%u)",
+                opus_plan_sequence_);
   } else {
     opus_granted_ = false;
     const char* reason = "unknown";
@@ -1904,7 +1868,6 @@ void PlannerNode::opus_trajectory_check_response(
   if (response->accepted) {
     opus_granted_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
-    opus_active_trajectories_.clear();
 
     RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
                 expected_seq);
@@ -1918,12 +1881,22 @@ void PlannerNode::opus_trajectory_check_response(
       set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
     }
   } else {
-    RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s — retrying with lock",
+    RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s",
                 response->reason.c_str());
-    // Lock is still held by coordinator on rejection — retry in-place
-    // without re-queuing. opus_granted_ stays true and grant_time_ is
-    // NOT reset so the local replan timeout still applies.
-    opus_submission_needed_ = true;
+    // On collision rejection the GCS retains the lock — we can retry with
+    // a new trajectory. On structural rejection (stale seq, lock not held)
+    // the GCS releases the lock — clear OPUS state to re-request.
+    // Detect structural rejection by checking if reason mentions "Stale" or "Lock not held".
+    bool structural = (response->reason.find("Stale") != std::string::npos ||
+                       response->reason.find("Lock not held") != std::string::npos);
+    if (structural) {
+      opus_granted_ = false;
+      opus_lock_pending_ = false;
+      opus_submission_needed_ = false;
+      opus_grant_time_ = std::chrono::steady_clock::time_point{};
+      opus_pre_queue_.reset();
+    }
+    // On collision rejection: opus_granted_ stays true, agent retries next frame
   }
 }
 
@@ -1969,7 +1942,6 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
     opus_lock_pending_ = false;
     opus_submission_needed_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
-    opus_active_trajectories_.clear();
     opus_pre_queue_.reset();
   }
 
@@ -2030,75 +2002,88 @@ Eigen::Vector3d PlannerNode::transform_camera_to_world(
 
 void PlannerNode::opus_submit_trajectory(
     const ruckig::Trajectory<3>& traj,
-    const ruckig::InputParameter<3>& input,
     const geometry_msgs::msg::TransformStamped& body_to_world,
     const geometry_msgs::msg::Point& world_position) {
-  // Transform camera-frame trajectory to world-frame (ENU) for GCS collision checking
-  // All drones submit trajectories in the shared world frame so inter-drone
-  // distances are meaningful.
+  // Extract per-phase polynomial parameters from Ruckig profile and transform
+  // each phase from camera frame (RDF) to world frame (ENU).
   //
-  // Frame convention:
-  //   - Camera: RDF (Right-Down-Forward) - depth image frame
-  //   - Body: FLU (Forward-Left-Up) - MAVROS/OmniDrones body frame
-  //   - World: ENU (East-North-Up) - shared local origin (VICON or sim)
+  // Each constant-acceleration phase is described by (p0, v0, a, duration)
+  // in local time [0, duration]. The affine transform p(t) = p0 + v0*t + 0.5*a*t^2
+  // transforms linearly: R*p(t) + offset = (R*p0+offset) + (R*v0)*t + 0.5*(R*a)*t^2
+  //
+  // This eliminates the need for the GCS to reconstruct the Ruckig trajectory.
 
-  ground_system_msgs::msg::RuckigTrajectory msg;
+  ground_system_msgs::msg::OpusTrajectory msg;
   msg.header.stamp = this->now();
   msg.drone_id = opus_drone_id_;
 
-  // Current state vectors in camera frame
-  Eigen::Vector3d curr_pos_cam(input.current_position[0], input.current_position[1], input.current_position[2]);
-  Eigen::Vector3d curr_vel_cam(input.current_velocity[0], input.current_velocity[1], input.current_velocity[2]);
+  auto profile_array = traj.get_profiles();
+  assert(profile_array.size() == 1);
+  auto profiles = profile_array[0];
+  assert(profiles.size() == 3);
 
-  // Target state vectors in camera frame
-  Eigen::Vector3d tgt_pos_cam(input.target_position[0], input.target_position[1], input.target_position[2]);
-  Eigen::Vector3d tgt_vel_cam(input.target_velocity[0], input.target_velocity[1], input.target_velocity[2]);
+  // Helper lambda: extract a single phase and transform to world frame
+  auto add_phase = [&](double duration,
+                       const std::array<double, 3>& p0_cam,
+                       const std::array<double, 3>& v0_cam,
+                       const std::array<double, 3>& a_cam) {
+    if (duration < 1e-6) return;
 
-  // Transform to world frame (ENU)
-  Eigen::Vector3d curr_pos_world = transform_camera_to_world(curr_pos_cam, body_to_world, true, world_position);
-  Eigen::Vector3d curr_vel_world = transform_camera_to_world(curr_vel_cam, body_to_world, false, world_position);
+    Eigen::Vector3d p0(p0_cam[0], p0_cam[1], p0_cam[2]);
+    Eigen::Vector3d v0(v0_cam[0], v0_cam[1], v0_cam[2]);
+    Eigen::Vector3d a(a_cam[0], a_cam[1], a_cam[2]);
 
-  Eigen::Vector3d tgt_pos_world = transform_camera_to_world(tgt_pos_cam, body_to_world, true, world_position);
-  Eigen::Vector3d tgt_vel_world = transform_camera_to_world(tgt_vel_cam, body_to_world, false, world_position);
+    // Transform each vector to world frame (ENU)
+    Eigen::Vector3d p0_world = transform_camera_to_world(p0, body_to_world, true, world_position);
+    Eigen::Vector3d v0_world = transform_camera_to_world(v0, body_to_world, false, world_position);
+    Eigen::Vector3d a_world  = transform_camera_to_world(a,  body_to_world, false, world_position);
 
-  // Pack into message (world frame - ENU coordinates)
-  // MIDI uses acceleration-input trajectories: only position, velocity,
-  // max_velocity, and max_acceleration are set. current_acceleration,
-  // target_acceleration, and max_jerk are left at zero so the coordinator
-  // reconstructs the same trajectory type (ruckig acceleration-input).
-  msg.current_position[0] = curr_pos_world.x();
-  msg.current_position[1] = curr_pos_world.y();
-  msg.current_position[2] = curr_pos_world.z();
-  msg.current_velocity[0] = curr_vel_world.x();
-  msg.current_velocity[1] = curr_vel_world.y();
-  msg.current_velocity[2] = curr_vel_world.z();
-  // current_acceleration left at 0 — acceleration-input trajectory
+    ground_system_msgs::msg::OpusPhaseSegment phase;
+    phase.p0 = {p0_world.x(), p0_world.y(), p0_world.z()};
+    phase.v0 = {v0_world.x(), v0_world.y(), v0_world.z()};
+    phase.a  = {a_world.x(),  a_world.y(),  a_world.z()};
+    phase.duration = duration;
+    msg.phases.push_back(phase);
+  };
 
-  msg.target_position[0] = tgt_pos_world.x();
-  msg.target_position[1] = tgt_pos_world.y();
-  msg.target_position[2] = tgt_pos_world.z();
-  msg.target_velocity[0] = tgt_vel_world.x();
-  msg.target_velocity[1] = tgt_vel_world.y();
-  msg.target_velocity[2] = tgt_vel_world.z();
-  // target_acceleration left at 0 — acceleration-input trajectory
+  // Brake sub-profile
+  double brake_dur = profiles[0].brake.duration;
+  if (brake_dur > 1e-6) {
+    add_phase(brake_dur,
+              {profiles[0].brake.p[0], profiles[1].brake.p[0], profiles[2].brake.p[0]},
+              {profiles[0].brake.v[0], profiles[1].brake.v[0], profiles[2].brake.v[0]},
+              {profiles[0].brake.a[0], profiles[1].brake.a[0], profiles[2].brake.a[0]});
+  }
 
-  // Transform per-axis kinematic limits from camera frame (RDF) to world frame (ENU).
-  // Camera RDF: [0]=right, [1]=down, [2]=forward
-  // Body FLU:   x=cam[2], y=cam[0], z=cam[1]
-  // World ENU:  yaw rotation mixes body x,y -> world x,y; body z -> world z
-  // So world XY limit = max(cam[0], cam[2]), world Z limit = cam[1]
-  double max_vel_xy = std::max(input.max_velocity[0], input.max_velocity[2]);
-  double max_acc_xy = std::max(input.max_acceleration[0], input.max_acceleration[2]);
-  msg.max_velocity[0] = max_vel_xy;
-  msg.max_velocity[1] = max_vel_xy;
-  msg.max_velocity[2] = input.max_velocity[1];     // cam down -> world up
-  msg.max_acceleration[0] = max_acc_xy;
-  msg.max_acceleration[1] = max_acc_xy;
-  msg.max_acceleration[2] = input.max_acceleration[1];
-  // max_jerk left at 0 — acceleration-input trajectory (no jerk constraint)
+  // Accel sub-profile
+  double accel_dur = profiles[0].accel.duration;
+  if (accel_dur > 1e-6) {
+    add_phase(accel_dur,
+              {profiles[0].accel.p[0], profiles[1].accel.p[0], profiles[2].accel.p[0]},
+              {profiles[0].accel.v[0], profiles[1].accel.v[0], profiles[2].accel.v[0]},
+              {profiles[0].accel.a[0], profiles[1].accel.a[0], profiles[2].accel.a[0]});
+  }
 
-  msg.start_time = this->now().seconds();
+  // 7 main phases
+  for (uint8_t i = 0; i < 7; i++) {
+    double dt = profiles[0].t[i];
+    if (dt < 1e-6) continue;
+    add_phase(dt,
+              {profiles[0].p[i], profiles[1].p[i], profiles[2].p[i]},
+              {profiles[0].v[i], profiles[1].v[i], profiles[2].v[i]},
+              {profiles[0].a[i], profiles[1].a[i], profiles[2].a[i]});
+  }
+
+  // Compute target position in world frame (last phase endpoint)
+  // Use the Ruckig output directly for the final position
+  std::array<double, 3> final_pos, final_vel, final_acc;
+  traj.at_time(traj.get_duration(), final_pos, final_vel, final_acc);
+  Eigen::Vector3d final_pos_cam(final_pos[0], final_pos[1], final_pos[2]);
+  Eigen::Vector3d tgt_pos_world = transform_camera_to_world(final_pos_cam, body_to_world, true, world_position);
+  msg.target_position = {tgt_pos_world.x(), tgt_pos_world.y(), tgt_pos_world.z()};
+
   msg.duration = traj.get_duration();
+  msg.start_time = 0.0;  // GCS stamps this on accept
 
   auto request = std::make_shared<ground_system_msgs::srv::OpusTrajectoryCheck::Request>();
   request->drone_id = opus_drone_id_;
@@ -2112,229 +2097,14 @@ void PlannerNode::opus_submit_trajectory(
     });
 
   RCLCPP_INFO(this->get_logger(),
-    "OPUS: Submitted trajectory (world: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f], dur=%.2fs)",
-    curr_pos_world.x(), curr_pos_world.y(), curr_pos_world.z(),
+    "OPUS: Submitted trajectory (target=[%.2f,%.2f,%.2f], dur=%.2fs, %zu phases)",
     tgt_pos_world.x(), tgt_pos_world.y(), tgt_pos_world.z(),
-    traj.get_duration());
+    traj.get_duration(), msg.phases.size());
 }
 
-ground_system_msgs::msg::RuckigTrajectory PlannerNode::ruckig_input_to_msg(
-    const ruckig::InputParameter<3>& input, double start_time, double duration) {
-  ground_system_msgs::msg::RuckigTrajectory msg;
-  msg.header.stamp = this->now();
-  msg.drone_id = opus_drone_id_;
-
-  for (int i = 0; i < 3; i++) {
-    msg.current_position[i] = input.current_position[i];
-    msg.current_velocity[i] = input.current_velocity[i];
-    msg.current_acceleration[i] = input.current_acceleration[i];
-    msg.target_position[i] = input.target_position[i];
-    msg.target_velocity[i] = input.target_velocity[i];
-    msg.target_acceleration[i] = input.target_acceleration[i];
-    msg.max_velocity[i] = input.max_velocity[i];
-    msg.max_acceleration[i] = input.max_acceleration[i];
-    msg.max_jerk[i] = input.max_jerk[i];
-  }
-
-  msg.start_time = start_time;
-  msg.duration = duration;
-  return msg;
-}
-
-// Decompose a ruckig Trajectory<3> into SecondOrderSegments parameterized
-// in global time (offset by time_offset from some common reference).
-// Mirrors DuPlanner::get_segments but uses global-time polynomial coefficients
-// so that segments from different trajectories share a common time axis.
-static std::vector<SecondOrderSegment> ruckig_to_global_segments(
-    const ruckig::Trajectory<3>& traj, double time_offset) {
-  std::vector<SecondOrderSegment> segments;
-
-  auto profile_array = traj.get_profiles();
-  assert(profile_array.size() == 1);
-  auto profiles = profile_array[0];
-  assert(profiles.size() == 3);
-
-  double cumulative_time = time_offset;
-
-  // Brake sub-profile (pre-trajectory)
-  double brake_dur = profiles[0].brake.duration;
-  if (brake_dur > 1e-6) {
-    double T0 = cumulative_time;
-    Eigen::Vector3d a(profiles[0].brake.a[0], profiles[1].brake.a[0], profiles[2].brake.a[0]);
-    Eigen::Vector3d v0(profiles[0].brake.v[0], profiles[1].brake.v[0], profiles[2].brake.v[0]);
-    Eigen::Vector3d p0(profiles[0].brake.p[0], profiles[1].brake.p[0], profiles[2].brake.p[0]);
-    Eigen::Vector3d half_a = a / 2.0;
-    segments.emplace_back(
-        std::vector<Eigen::Vector3d>{
-            half_a,
-            v0 - a * T0,
-            p0 - v0 * T0 + half_a * (T0 * T0)},
-        T0, T0 + brake_dur);
-    cumulative_time += brake_dur;
-  }
-
-  // Accel sub-profile (pre-trajectory)
-  double accel_dur = profiles[0].accel.duration;
-  if (accel_dur > 1e-6) {
-    double T0 = cumulative_time;
-    Eigen::Vector3d a(profiles[0].accel.a[0], profiles[1].accel.a[0], profiles[2].accel.a[0]);
-    Eigen::Vector3d v0(profiles[0].accel.v[0], profiles[1].accel.v[0], profiles[2].accel.v[0]);
-    Eigen::Vector3d p0(profiles[0].accel.p[0], profiles[1].accel.p[0], profiles[2].accel.p[0]);
-    Eigen::Vector3d half_a = a / 2.0;
-    segments.emplace_back(
-        std::vector<Eigen::Vector3d>{
-            half_a,
-            v0 - a * T0,
-            p0 - v0 * T0 + half_a * (T0 * T0)},
-        T0, T0 + accel_dur);
-    cumulative_time += accel_dur;
-  }
-
-  // 7 main phases
-  for (uint8_t i = 0; i < 7; i++) {
-    double dt = profiles[0].t[i];
-    if (dt < 1e-6) continue;
-    double T0 = cumulative_time;
-    Eigen::Vector3d a(profiles[0].a[i], profiles[1].a[i], profiles[2].a[i]);
-    Eigen::Vector3d v0(profiles[0].v[i], profiles[1].v[i], profiles[2].v[i]);
-    Eigen::Vector3d p0(profiles[0].p[i], profiles[1].p[i], profiles[2].p[i]);
-    Eigen::Vector3d half_a = a / 2.0;
-    segments.emplace_back(
-        std::vector<Eigen::Vector3d>{
-            half_a,
-            v0 - a * T0,
-            p0 - v0 * T0 + half_a * (T0 * T0)},
-        T0, T0 + dt);
-    cumulative_time += dt;
-  }
-
-  return segments;
-}
-
-bool PlannerNode::is_trajectory_safe_against_swarm(
-    const ruckig::Trajectory<3>& planned_traj,
-    const ruckig::InputParameter<3>& input_camera_frame,
-    const rclcpp::Time& planned_start_time,
-    const geometry_msgs::msg::TransformStamped& body_to_world,
-    const geometry_msgs::msg::Point& world_position,
-    const std::vector<ground_system_msgs::msg::RuckigTrajectory>& active_trajectories) {
-  // Both planned trajectory and active_trajectories must be compared in the same frame.
-  // active_trajectories are already in world frame (ENU) from the GCS.
-  // We need to transform the planned trajectory from camera frame to world frame.
-
-  double safety_distance = 2.0 * _planning_vehicle_radius;
-  double planned_start_sec = planned_start_time.seconds();
-  double planned_duration = planned_traj.get_duration();
-  double planned_end_sec = planned_start_sec + planned_duration;
-
-  // Build world-frame input for the planned trajectory
-  // MIDI uses acceleration-input trajectories: only position and velocity are needed.
-  Eigen::Vector3d curr_pos_cam(input_camera_frame.current_position[0],
-                                input_camera_frame.current_position[1],
-                                input_camera_frame.current_position[2]);
-  Eigen::Vector3d curr_vel_cam(input_camera_frame.current_velocity[0],
-                                input_camera_frame.current_velocity[1],
-                                input_camera_frame.current_velocity[2]);
-  Eigen::Vector3d tgt_pos_cam(input_camera_frame.target_position[0],
-                               input_camera_frame.target_position[1],
-                               input_camera_frame.target_position[2]);
-  Eigen::Vector3d tgt_vel_cam(input_camera_frame.target_velocity[0],
-                               input_camera_frame.target_velocity[1],
-                               input_camera_frame.target_velocity[2]);
-
-  // Transform to world frame
-  Eigen::Vector3d curr_pos_world = transform_camera_to_world(curr_pos_cam, body_to_world, true, world_position);
-  Eigen::Vector3d curr_vel_world = transform_camera_to_world(curr_vel_cam, body_to_world, false, world_position);
-  Eigen::Vector3d tgt_pos_world = transform_camera_to_world(tgt_pos_cam, body_to_world, true, world_position);
-  Eigen::Vector3d tgt_vel_world = transform_camera_to_world(tgt_vel_cam, body_to_world, false, world_position);
-
-  // Build world-frame ruckig input for planned trajectory
-  // MIDI uses acceleration-input trajectories: only set position, velocity,
-  // max_velocity, and max_acceleration. Do NOT set current_acceleration,
-  // target_acceleration, or max_jerk so ruckig generates the same trajectory type.
-  ruckig::InputParameter<3> planned_input_world;
-  planned_input_world.current_position = {curr_pos_world.x(), curr_pos_world.y(), curr_pos_world.z()};
-  planned_input_world.current_velocity = {curr_vel_world.x(), curr_vel_world.y(), curr_vel_world.z()};
-  planned_input_world.target_position = {tgt_pos_world.x(), tgt_pos_world.y(), tgt_pos_world.z()};
-  planned_input_world.target_velocity = {tgt_vel_world.x(), tgt_vel_world.y(), tgt_vel_world.z()};
-  // Transform per-axis kinematic limits from camera RDF to world ENU.
-  // Yaw rotation mixes body x,y → world x,y: use max(cam[0], cam[2]) for XY.
-  // World Z = cam[1].
-  {
-    double max_vel_xy = std::max(input_camera_frame.max_velocity[0], input_camera_frame.max_velocity[2]);
-    double max_acc_xy = std::max(input_camera_frame.max_acceleration[0], input_camera_frame.max_acceleration[2]);
-    planned_input_world.max_velocity = {max_vel_xy, max_vel_xy, input_camera_frame.max_velocity[1]};
-    planned_input_world.max_acceleration = {max_acc_xy, max_acc_xy, input_camera_frame.max_acceleration[1]};
-  }
-
-  // Regenerate trajectory in world frame
-  ruckig::Ruckig<3> otg_planned;
-  ruckig::Trajectory<3> planned_traj_world;
-  auto planned_result = otg_planned.calculate(planned_input_world, planned_traj_world);
-  if (planned_result < 0) {
-    RCLCPP_WARN(this->get_logger(), "OPUS: Failed to reconstruct planned trajectory in world frame");
-    return false;  // Can't verify, reject for safety
-  }
-
-  // Use overlap_start as common time reference to keep polynomial coefficients small
-  double t_ref = planned_start_sec;
-
-  // Decompose planned trajectory into global-time segments
-  std::vector<SecondOrderSegment> planned_segments =
-      ruckig_to_global_segments(planned_traj_world, planned_start_sec - t_ref);
-
-  for (const auto& existing : active_trajectories) {
-    if (existing.drone_id == opus_drone_id_) continue;  // Skip own trajectory
-
-    // Find overlapping time interval
-    double ex_start = existing.start_time;
-    double ex_end = ex_start + existing.duration;
-    double overlap_start = std::max(planned_start_sec, ex_start);
-    double overlap_end = std::min(planned_end_sec, ex_end);
-
-    if (overlap_start >= overlap_end) continue;  // No temporal overlap
-
-    // Reconstruct existing trajectory (already in world frame from GCS)
-    ruckig::InputParameter<3> ex_input;
-    for (int i = 0; i < 3; i++) {
-      ex_input.current_position[i] = existing.current_position[i];
-      ex_input.current_velocity[i] = existing.current_velocity[i];
-      ex_input.target_position[i] = existing.target_position[i];
-      ex_input.target_velocity[i] = existing.target_velocity[i];
-      ex_input.max_velocity[i] = existing.max_velocity[i];
-      ex_input.max_acceleration[i] = existing.max_acceleration[i];
-    }
-
-    ruckig::Ruckig<3> otg;
-    ruckig::Trajectory<3> ex_traj;
-    auto result = otg.calculate(ex_input, ex_traj);
-    if (result < 0) {
-      RCLCPP_WARN(this->get_logger(),
-        "OPUS: Cannot reconstruct trajectory for Drone %d (ruckig=%d), assuming collision",
-        existing.drone_id, static_cast<int>(result));
-      return false;  // Can't verify safety, reject for safety
-    }
-
-    // Decompose existing trajectory into global-time segments (same t_ref)
-    std::vector<SecondOrderSegment> ex_segments =
-        ruckig_to_global_segments(ex_traj, ex_start - t_ref);
-
-    // Closed-form minimum distance: iterate all segment pairs
-    double safety_dist_sq = safety_distance * safety_distance;
-    for (const auto& seg_p : planned_segments) {
-      for (const auto& seg_e : ex_segments) {
-        double min_dist_sq = seg_p.get_min_distance_square_to_segment(seg_e);
-        if (min_dist_sq < safety_dist_sq) {
-          RCLCPP_WARN(this->get_logger(),
-            "OPUS: Collision with Drone %d (dist=%.3f < %.3f)",
-            existing.drone_id, std::sqrt(min_dist_sq), safety_distance);
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
+// ruckig_input_to_msg and ruckig_to_global_segments removed:
+// Agent now submits per-phase polynomial parameters (OpusTrajectory) directly.
+// GCS performs collision checking using opus_math.py.
 
 void PlannerNode::visualise(const sensor_msgs::msg::Image::SharedPtr depth_msg) {
   if (!rclcpp::ok()) {
