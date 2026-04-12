@@ -220,3 +220,142 @@ TEST(PolynomialBase, ExtremesAndTerminals) {
 TEST(PolynomialBase, InvalidTimeRange) {
   EXPECT_THROW(SecondOrderPolynomial({1.0, 0.0, 0.0}, 5.0, 1.0), std::invalid_argument);
 }
+
+// ============================================================================
+// Bug fix: quartic resolvent on narrow interval
+// ============================================================================
+
+TEST(FourthOrderPolynomial, ResolventNarrowInterval) {
+  // Quartic on a very narrow interval [0, 0.1].
+  // The cubic resolvent roots can be far outside this range. Before the fix,
+  // the resolvent solver used [start_time, end_time] which would miss them,
+  // causing an out-of-bounds access on the empty roots vector.
+  // (x-5)^2 * (x-6)^2 = x^4 - 22x^3 + 181x^2 - 660x + 900
+  FourthOrderPolynomial p({1.0, -22.0, 181.0, -660.0, 900.0}, 0.0, 0.1);
+
+  // solve_roots should not crash, and the roots (5,6) are outside [0,0.1]
+  std::vector<double> roots;
+  EXPECT_NO_THROW(p.solve_roots(roots));
+  EXPECT_EQ(roots.size(), 0u);  // roots 5 and 6 are outside [0, 0.1]
+
+  // get_min should give value at t=0.1 (monotonically decreasing from 900)
+  double min_val = p.get_min();
+  double expected = p.get_value(0.1);  // ~900 - 66 + ... small
+  EXPECT_NEAR(min_val, expected, 1e-6);
+}
+
+TEST(FourthOrderPolynomial, RootsFilteredByInterval) {
+  // (x-1)(x-2)(x-3)(x-4) on [1.5, 3.5] — should only return roots 2 and 3
+  FourthOrderPolynomial p({1.0, -10.0, 35.0, -50.0, 24.0}, 1.5, 3.5);
+
+  std::vector<double> roots;
+  p.solve_roots(roots);
+  std::sort(roots.begin(), roots.end());
+
+  // Only roots 2 and 3 are within [1.5, 3.5]
+  ASSERT_EQ(roots.size(), 2u);
+  EXPECT_NEAR(roots[0], 2.0, 1e-5);
+  EXPECT_NEAR(roots[1], 3.0, 1e-5);
+}
+
+// ============================================================================
+// Bug fix: quadratic derivative roots with zero leading coefficient
+// ============================================================================
+
+TEST(SecondOrderPolynomial, DerivativeRootsZeroLeading) {
+  // 0*x^2 + 5*x + 3: derivative = 0*2*x + 5 = 5 (constant).
+  // No extremum should be returned (previously threw).
+  SecondOrderPolynomial p({0.0, 5.0, 3.0}, 0.0, 10.0);
+
+  std::vector<double> droots;
+  EXPECT_NO_THROW(p.solve_derivative_roots(droots));
+  EXPECT_EQ(droots.size(), 0u);
+}
+
+// ============================================================================
+// Fuzz tests: random polynomials, verify get_min() <= brute force
+// ============================================================================
+
+static double rand_in(double lo, double hi) {
+  return lo + (hi - lo) * (rand() / static_cast<double>(RAND_MAX));
+}
+
+TEST(SecondOrderPolynomial, FuzzGetMin) {
+  srand(42);
+  for (int trial = 0; trial < 200; ++trial) {
+    double a = rand_in(-5, 5), b = rand_in(-5, 5), c = rand_in(-5, 5);
+    double t0 = rand_in(-3, 3), t1 = t0 + rand_in(0.01, 5);
+    SecondOrderPolynomial p({a, b, c}, t0, t1);
+
+    double analytical = p.get_min();
+    double sampled = 1e18;
+    for (int i = 0; i <= 1000; ++i) {
+      double t = t0 + (t1 - t0) * i / 1000.0;
+      sampled = std::min(sampled, p.get_value(t));
+    }
+    EXPECT_LE(analytical, sampled + 1e-4)
+      << "Trial " << trial << ": a=" << a << " b=" << b << " c=" << c
+      << " [" << t0 << "," << t1 << "]";
+  }
+}
+
+TEST(ThirdOrderPolynomial, FuzzGetMin) {
+  srand(42);
+  for (int trial = 0; trial < 200; ++trial) {
+    double a = rand_in(-5, 5);
+    if (fabs(a) < 0.01) a = 0.01;  // avoid zero leading coeff
+    double b = rand_in(-5, 5), c = rand_in(-5, 5), d = rand_in(-5, 5);
+    double t0 = rand_in(-3, 3), t1 = t0 + rand_in(0.01, 5);
+    ThirdOrderPolynomial p({a, b, c, d}, t0, t1);
+
+    double analytical = p.get_min();
+    double sampled = 1e18;
+    for (int i = 0; i <= 2000; ++i) {
+      double t = t0 + (t1 - t0) * i / 2000.0;
+      sampled = std::min(sampled, p.get_value(t));
+    }
+    EXPECT_LE(analytical, sampled + 1e-3)
+      << "Trial " << trial << ": [" << a << "," << b << ","
+      << c << "," << d << "] on [" << t0 << "," << t1 << "]";
+  }
+}
+
+TEST(FourthOrderPolynomial, FuzzGetMin) {
+  srand(42);
+  for (int trial = 0; trial < 200; ++trial) {
+    double a = rand_in(-5, 5);
+    if (fabs(a) < 0.01) a = 0.01;
+    double b = rand_in(-5, 5), c = rand_in(-5, 5);
+    double d = rand_in(-5, 5), e = rand_in(-5, 5);
+    double t0 = rand_in(-3, 3), t1 = t0 + rand_in(0.01, 5);
+    FourthOrderPolynomial p({a, b, c, d, e}, t0, t1);
+
+    double analytical = p.get_min();
+    double sampled = 1e18;
+    for (int i = 0; i <= 5000; ++i) {
+      double t = t0 + (t1 - t0) * i / 5000.0;
+      sampled = std::min(sampled, p.get_value(t));
+    }
+    EXPECT_LE(analytical, sampled + 1e-2)
+      << "Trial " << trial << ": [" << a << "," << b << ","
+      << c << "," << d << "," << e << "] on [" << t0 << "," << t1 << "]";
+  }
+}
+
+// ============================================================================
+// Degenerate: near-zero leading coefficients
+// ============================================================================
+
+TEST(FourthOrderPolynomial, NearZeroLeading) {
+  // 1e-15 * x^4 + 0*x^3 + x^2 - 2x + 1 ≈ (x-1)^2 on [0, 3]
+  // get_min() should be ~0 near x=1
+  FourthOrderPolynomial p({1e-15, 0.0, 1.0, -2.0, 1.0}, 0.0, 3.0);
+  EXPECT_NEAR(p.get_min(), 0.0, 1e-6);
+}
+
+TEST(ThirdOrderPolynomial, NearZeroLeading) {
+  // 1e-15 * x^3 + x^2 - 4x + 5 ~ quadratic with min at x=2 → value 1
+  // Leading coeff must be non-zero for ThirdOrderPolynomial
+  ThirdOrderPolynomial p({1e-15, 1.0, -4.0, 5.0}, 0.0, 5.0);
+  EXPECT_NEAR(p.get_min(), 1.0, 1e-3);
+}

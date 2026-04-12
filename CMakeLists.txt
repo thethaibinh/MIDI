@@ -179,6 +179,10 @@ if(BUILD_TESTING)
   # Test: trajectory cost function
   ament_add_gtest(test_trajectory_cost test/test_trajectory_cost.cpp)
   target_include_directories(test_trajectory_cost PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  # Test: OPUS planner state machine transitions
+  ament_add_gtest(test_opus_state_machine test/test_opus_state_machine.cpp)
+  target_include_directories(test_opus_state_machine PRIVATE include ${EIGEN3_INCLUDE_DIRS})
 endif()
 
 ament_package()

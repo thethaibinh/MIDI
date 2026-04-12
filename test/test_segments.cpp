@@ -302,3 +302,77 @@ TEST(SecondOrderSegment, WrongCoefficientCount) {
       0.0, 1.0),
     std::invalid_argument);
 }
+
+// ============================================================================
+// SecondOrderSegment — degenerate / edge case tests
+// ============================================================================
+
+TEST(SecondOrderSegment, StationaryDronesKnownDistance) {
+  // Two stationary drones at (0,0,0) and (0,2,0)
+  // All-zero velocity & acceleration: should return constant distance = 4
+  SecondOrderSegment seg_a(
+    {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d(0, 0, 0)},
+    0.0, 5.0);
+  SecondOrderSegment seg_b(
+    {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d(0, 2, 0)},
+    0.0, 5.0);
+
+  double min_dist_sq = seg_a.get_min_distance_square_to_segment(seg_b);
+  EXPECT_NEAR(min_dist_sq, 4.0, 1e-10);
+}
+
+TEST(SecondOrderSegment, PartialTimeOverlap) {
+  // Seg A: [0, 3], Seg B: [2, 5] — overlap [2, 3]
+  // A: p(t) = (t, 0, 0), B: p(t) = (0, t, 0)
+  // d(t) = (t, -t, 0), ||d||^2 = 2t^2, min at t=2 → 8
+  SecondOrderSegment seg_a(
+    {Eigen::Vector3d::Zero(), Eigen::Vector3d(1, 0, 0), Eigen::Vector3d::Zero()},
+    0.0, 3.0);
+  SecondOrderSegment seg_b(
+    {Eigen::Vector3d::Zero(), Eigen::Vector3d(0, 1, 0), Eigen::Vector3d::Zero()},
+    2.0, 5.0);
+
+  double min_dist_sq = seg_a.get_min_distance_square_to_segment(seg_b);
+  EXPECT_NEAR(min_dist_sq, 8.0, 1e-6);
+}
+
+TEST(SecondOrderSegment, IdenticalSegmentsZeroDistance) {
+  // Same trajectory → distance should be 0
+  SecondOrderSegment seg(
+    {Eigen::Vector3d(0.5, 0, 0), Eigen::Vector3d(1, 0, 0), Eigen::Vector3d(0, 0, 0)},
+    0.0, 2.0);
+
+  double min_dist_sq = seg.get_min_distance_square_to_segment(seg);
+  EXPECT_NEAR(min_dist_sq, 0.0, 1e-10);
+}
+
+TEST(SecondOrderSegment, FuzzMinDistVsBruteForce) {
+  srand(42);
+  for (int trial = 0; trial < 50; ++trial) {
+    auto rv = [](double scale) {
+      return Eigen::Vector3d(
+        scale * (rand() / (double)RAND_MAX - 0.5),
+        scale * (rand() / (double)RAND_MAX - 0.5),
+        scale * (rand() / (double)RAND_MAX - 0.5));
+    };
+    double t0 = (rand() / (double)RAND_MAX) * 2.0;
+    double t1 = t0 + 0.5 + (rand() / (double)RAND_MAX) * 3.0;
+
+    SecondOrderSegment seg_a({rv(2.0), rv(3.0), rv(5.0)}, t0, t1);
+    SecondOrderSegment seg_b({rv(2.0), rv(3.0), rv(5.0)}, t0, t1);
+
+    double analytical = seg_a.get_min_distance_square_to_segment(seg_b);
+
+    double sampled = 1e18;
+    for (int i = 0; i <= 10000; ++i) {
+      double t = t0 + (t1 - t0) * i / 10000.0;
+      double d = (seg_a.get_point(t) - seg_b.get_point(t)).squaredNorm();
+      sampled = std::min(sampled, d);
+    }
+
+    EXPECT_LE(analytical, sampled + 1e-3)
+      << "Fuzz trial " << trial << " on [" << t0 << "," << t1 << "]";
+    EXPECT_NEAR(analytical, sampled, 0.1)
+      << "Fuzz trial " << trial << " diverged too far from brute force";
+  }
+}

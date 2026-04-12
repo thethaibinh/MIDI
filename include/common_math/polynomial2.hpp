@@ -45,15 +45,16 @@ class SecondOrderPolynomial : public Polynomial {
 
   void solve_derivative_roots(std::vector<double>& roots) const override {
     std::vector<double> diff_coeffs = get_derivative_coeffs();
-    if (diff_coeffs[0] == 0 || diff_coeffs.size() != 2) {
+    if (diff_coeffs.size() != 2) {
       throw std::invalid_argument(
-        "The derivative of this quadratic polynomial must be a linear "
-        "polynomial.");
-    } else {
-      roots.push_back(-diff_coeffs[1] / diff_coeffs[0]);
-      if ((roots.back() < get_start_time()) || (roots.back() > get_end_time())) {
-        roots.pop_back();
-      }
+        "The derivative of a quadratic polynomial must have exactly 2 "
+        "coefficients.");
+    }
+    // Zero leading coefficient means constant derivative — no extremum
+    if (diff_coeffs[0] == 0) return;
+    double root = -diff_coeffs[1] / diff_coeffs[0];
+    if (root >= get_start_time() && root <= get_end_time()) {
+      roots.push_back(root);
     }
   }
 

@@ -78,19 +78,23 @@ class FourthOrderPolynomial : public Polynomial {
     int rCnt = 0;
     // cubic resolvent
     // y^3 − b*y^2 + (ac−4d)*y − a^2*d−c^2+4*b*d = 0
+    // Note: resolvent roots are mathematical auxiliaries — they are NOT bounded
+    // by the quartic's domain, so we use a very wide interval.
 
     std::vector<double> coeffs = {1, a3, b3, c3};
-    ThirdOrderPolynomial pol3(coeffs, get_start_time(), get_end_time());
+    ThirdOrderPolynomial pol3(coeffs, -1e15, 1e15);
     std::vector<double> x3;
     unsigned int iZeroes = pol3.solve_roots(x3);
+
+    if (x3.empty()) return 0;
 
     double q1, q2, p1, p2, D, sqD, y;
 
     y = x3[0];
     // The essence - choosing Y with maximal absolute value.
     if (iZeroes != 1) {
-      if (fabs(x3[1]) > fabs(y)) y = x3[1];
-      if (fabs(x3[2]) > fabs(y)) y = x3[2];
+      if (x3.size() > 1 && fabs(x3[1]) > fabs(y)) y = x3[1];
+      if (x3.size() > 2 && fabs(x3[2]) > fabs(y)) y = x3[2];
     }
 
     // h1+h2 = y && h1*h2 = d  <=>  h^2 -y*h + d = 0    (h === q)
@@ -122,22 +126,21 @@ class FourthOrderPolynomial : public Polynomial {
     // solving quadratic eq. - x^2 + p1*x + q1 = 0
     D = p1 * p1 - 4 * q1;
     if (!(D < 0.0)) {
-      // real roots filled from left
       sqD = sqrt(D);
-      roots.push_back((-p1 + sqD) * 0.5);
-      ++rCnt;
-      roots.push_back((-p1 - sqD) * 0.5);
-      ++rCnt;
+      double r1 = (-p1 + sqD) * 0.5;
+      double r2 = (-p1 - sqD) * 0.5;
+      if (r1 >= get_start_time() && r1 <= get_end_time()) { roots.push_back(r1); ++rCnt; }
+      if (r2 >= get_start_time() && r2 <= get_end_time()) { roots.push_back(r2); ++rCnt; }
     }
 
     // solving quadratic eq. - x^2 + p2*x + q2 = 0
     D = p2 * p2 - 4 * q2;
     if (!(D < 0.0)) {
       sqD = sqrt(D);
-      roots.push_back((-p2 + sqD) * 0.5);
-      ++rCnt;
-      roots.push_back((-p2 - sqD) * 0.5);
-      ++rCnt;
+      double r3 = (-p2 + sqD) * 0.5;
+      double r4 = (-p2 - sqD) * 0.5;
+      if (r3 >= get_start_time() && r3 <= get_end_time()) { roots.push_back(r3); ++rCnt; }
+      if (r4 >= get_start_time() && r4 <= get_end_time()) { roots.push_back(r4); ++rCnt; }
     }
 
     return rCnt;
