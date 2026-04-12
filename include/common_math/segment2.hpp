@@ -168,6 +168,51 @@ class SecondOrderSegment : public Segment {
     }
   }
 
+  //! Minimum squared Euclidean distance to another SecondOrderSegment over
+  //! their overlapping time interval. Both segments must share the same global
+  //! time parameterization. The difference d(t) = p_A(t) - p_B(t) is itself a
+  //! second-order polynomial, so ||d(t)||^2 is a 4th-order polynomial whose
+  //! minimum can be found analytically.
+  double get_min_distance_square_to_segment(const SecondOrderSegment& other) const {
+    double t_start = std::max(get_start_time(), other.get_start_time());
+    double t_end = std::min(get_end_time(), other.get_end_time());
+    if (t_start >= t_end) return std::numeric_limits<double>::infinity();
+
+    std::vector<Eigen::Vector3d> ca = get_coeffs();
+    std::vector<Eigen::Vector3d> cb = other.get_coeffs();
+
+    // Difference polynomial coefficients
+    double a1 = ca[0][0] - cb[0][0], b1 = ca[1][0] - cb[1][0], c1 = ca[2][0] - cb[2][0];
+    double a2 = ca[0][1] - cb[0][1], b2 = ca[1][1] - cb[1][1], c2 = ca[2][1] - cb[2][1];
+    double a3 = ca[0][2] - cb[0][2], b3 = ca[1][2] - cb[1][2], c3 = ca[2][2] - cb[2][2];
+
+    // ||d(t)||^2 — same form as get_euclidean_distance_square with pixel=(0,0,0)
+    std::vector<double> dist_sq_coeffs = {
+      a1 * a1 + a2 * a2 + a3 * a3,
+      2.0 * (a1 * b1 + a2 * b2 + a3 * b3),
+      2.0 * (a1 * c1 + a2 * c2 + a3 * c3) + b1 * b1 + b2 * b2 + b3 * b3,
+      2.0 * (b1 * c1 + b2 * c2 + b3 * c3),
+      c1 * c1 + c2 * c2 + c3 * c3};
+
+    if (dist_sq_coeffs[0] != 0) {
+      FourthOrderPolynomial pol4(dist_sq_coeffs, t_start, t_end);
+      return pol4.get_min();
+    } else if (dist_sq_coeffs[1] != 0) {
+      dist_sq_coeffs.erase(dist_sq_coeffs.begin());
+      ThirdOrderPolynomial pol3(dist_sq_coeffs, t_start, t_end);
+      return pol3.get_min();
+    } else {
+      dist_sq_coeffs.erase(dist_sq_coeffs.begin());
+      dist_sq_coeffs.erase(dist_sq_coeffs.begin());
+      SecondOrderPolynomial pol2(dist_sq_coeffs, t_start, t_end);
+      return pol2.get_min();
+    }
+  }
+
+  double get_min_distance_to_segment(const SecondOrderSegment& other) const {
+    return sqrt(get_min_distance_square_to_segment(other));
+  }
+
   double get_mahalanobis_distance(const Eigen::Vector3d& mean,
                                   const Eigen::Vector3d& cov_diag) const {
     const double hmds = get_half_mahalanobis_distance_square(mean, cov_diag);

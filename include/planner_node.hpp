@@ -233,7 +233,6 @@ class PlannerNode : public rclcpp::Node {
   using OpusPlanLockAction = ground_system_msgs::action::OpusPlanLock;
   using OpusPlanLockGoalHandle = rclcpp_action::ClientGoalHandle<OpusPlanLockAction>;
   void opus_send_lock_goal();
-  void opus_lock_goal_response_callback(const OpusPlanLockGoalHandle::SharedPtr& goal_handle);
   void opus_lock_feedback_callback(
       OpusPlanLockGoalHandle::SharedPtr,
       const std::shared_ptr<const OpusPlanLockAction::Feedback> feedback);
@@ -245,7 +244,8 @@ class PlannerNode : public rclcpp::Node {
                               const geometry_msgs::msg::TransformStamped& body_to_world,
                               const geometry_msgs::msg::Point& world_position);
   void opus_trajectory_check_response(
-      rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future);
+      rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future,
+      uint32_t expected_seq);
   bool is_trajectory_safe_against_swarm(
       const ruckig::Trajectory<3>& planned_traj,
       const ruckig::InputParameter<3>& input_camera_frame,
@@ -346,10 +346,11 @@ class PlannerNode : public rclcpp::Node {
   bool opus_check_pending_ = false;    // Waiting for TrajectoryCheck service response
   bool opus_lock_pending_ = false;     // Lock goal sent, waiting for grant result
   uint8_t opus_drone_id_ = 0;
+  uint32_t opus_plan_sequence_ = 0;    // Monotonic counter for correlating lock/check/abort
   std::vector<ground_system_msgs::msg::RuckigTrajectory> opus_active_trajectories_;
   ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting check response
   std::mutex opus_mutex_;
-  double opus_local_replan_timeout_ = 1.0;
+  double opus_local_replan_timeout_ = kOpusLocalReplanTimeout_;
 
   // OPUS pre-queue: the latest locally planned trajectory waiting for OPUS submission.
   // img_callback always plans locally and overwrites this. At replan time,
@@ -367,7 +368,7 @@ class PlannerNode : public rclcpp::Node {
 
   // OPUS timeout tracking (monotonic clock)
   std::chrono::steady_clock::time_point opus_grant_time_{};
-  static constexpr double kOpusLocalReplanTimeout_ = 5.0;  // seconds before aborting local replanning
+  static constexpr double kOpusLocalReplanTimeout_ = 2.0;  // seconds before aborting local replanning
 };
 
 #endif  // PLANNER_NODE_HPP

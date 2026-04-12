@@ -612,6 +612,10 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_active_trajectories_.clear();
     opus_pre_queue_.reset();
+    opus_pending_trajectory_ = ruckig::Trajectory<3>();  // Clear stale trajectory
+    // Bump sequence so any in-flight goal-response / service-response callbacks
+    // for the old round will be detected as stale and discarded.
+    ++opus_plan_sequence_;
     // Cancel any in-flight action goal
     if (opus_goal_handle_) {
       opus_lock_client_->async_cancel_goal(opus_goal_handle_);
@@ -907,8 +911,10 @@ void PlannerNode::update_planner_state() {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_submission_needed_ = true;
         opus_pre_queue_.reset();
+        set_auto_pilot_state_forced(PlanningStates::WAITING_FOR_OPUS);
+      } else {
+        set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
       }
-      set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
     }
   }
   // Transition to GO_TO_GOAL / HOLDING_WAYPOINT when near goal
@@ -982,9 +988,10 @@ void PlannerNode::track_trajectory() {
       !_goal_set)
     return;
 
-  // ALIGNING_HEADING and HOLDING_WAYPOINT: hold position, rotate toward goal
+  // ALIGNING_HEADING, HOLDING_WAYPOINT, WAITING_FOR_OPUS: hold position, rotate toward goal
   if (_planner_state == PlanningStates::ALIGNING_HEADING ||
-      _planner_state == PlanningStates::HOLDING_WAYPOINT) {
+      _planner_state == PlanningStates::HOLDING_WAYPOINT ||
+      _planner_state == PlanningStates::WAITING_FOR_OPUS) {
     if (_runtime_mode == RuntimeModes::MAVROS) {
       TrajectoryPoint hold_point;
       hold_point.position = geometryToEigen(_state.pose.position);
@@ -1431,7 +1438,9 @@ void PlannerNode::log_mission_to_yaml(const ground_system_msgs::msg::SwarmMissio
 void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   const rclcpp::Time time_now = this->now();
 
-  if (new_state != PlanningStates::TRAJECTORY_CONTROL && !trajectory_queue_.empty()) {
+  if (new_state != PlanningStates::TRAJECTORY_CONTROL &&
+      new_state != PlanningStates::WAITING_FOR_OPUS &&
+      !trajectory_queue_.empty()) {
     trajectory_queue_.clear();
   }
   time_of_switch_to_current_state_ = time_now;
@@ -1450,6 +1459,9 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
       break;
     case PlanningStates::ALIGNING_HEADING:
       state_name = "ALIGNING_HEADING";
+      break;
+    case PlanningStates::WAITING_FOR_OPUS:
+      state_name = "WAITING_FOR_OPUS";
       break;
     case PlanningStates::TRAJECTORY_CONTROL:
       state_name = "TRAJECTORY_CONTROL";
@@ -1477,7 +1489,8 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
 }
 
 void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
-  if (_planner_state != PlanningStates::TRAJECTORY_CONTROL)
+  if (_planner_state != PlanningStates::TRAJECTORY_CONTROL &&
+      _planner_state != PlanningStates::WAITING_FOR_OPUS)
     return;
   
   rclcpp::Time time_now = this->now();  // Wall clock (no use_sim_time)
@@ -1786,12 +1799,36 @@ void PlannerNode::opus_send_lock_goal() {
     return;
   }
 
+  ++opus_plan_sequence_;  // New planning round
+
   auto goal_msg = OpusPlanLockAction::Goal();
   goal_msg.drone_id = opus_drone_id_;
+  goal_msg.plan_sequence = opus_plan_sequence_;
 
   auto send_goal_options = rclcpp_action::Client<OpusPlanLockAction>::SendGoalOptions();
+  // Capture sequence for the goal-response callback to detect stale responses
+  uint32_t sent_seq = opus_plan_sequence_;
   send_goal_options.goal_response_callback =
-    std::bind(&PlannerNode::opus_lock_goal_response_callback, this, std::placeholders::_1);
+    [this, sent_seq](const OpusPlanLockGoalHandle::SharedPtr& goal_handle) {
+      const std::lock_guard<std::mutex> lock(opus_mutex_);
+      if (sent_seq != opus_plan_sequence_) {
+        // Stale response from a previous round — cancel immediately if accepted
+        if (goal_handle) {
+          opus_lock_client_->async_cancel_goal(goal_handle);
+        }
+        RCLCPP_WARN(this->get_logger(),
+          "OPUS: Ignoring stale goal response (seq %u, current %u)",
+          sent_seq, opus_plan_sequence_);
+        return;
+      }
+      if (!goal_handle) {
+        RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal was rejected by coordinator");
+        opus_lock_pending_ = false;
+        return;
+      }
+      opus_goal_handle_ = goal_handle;
+      RCLCPP_INFO(this->get_logger(), "OPUS: Lock goal accepted, waiting for grant");
+    };
   send_goal_options.feedback_callback =
     std::bind(&PlannerNode::opus_lock_feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
   send_goal_options.result_callback =
@@ -1799,19 +1836,8 @@ void PlannerNode::opus_send_lock_goal() {
 
   opus_lock_client_->async_send_goal(goal_msg, send_goal_options);
   opus_lock_pending_ = true;
-  RCLCPP_INFO(this->get_logger(), "OPUS: Sent lock goal (drone_id=%d)", opus_drone_id_);
-}
-
-void PlannerNode::opus_lock_goal_response_callback(
-    const OpusPlanLockGoalHandle::SharedPtr& goal_handle) {
-  const std::lock_guard<std::mutex> lock(opus_mutex_);
-  if (!goal_handle) {
-    RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal was rejected by coordinator");
-    opus_lock_pending_ = false;
-    return;
-  }
-  opus_goal_handle_ = goal_handle;
-  RCLCPP_INFO(this->get_logger(), "OPUS: Lock goal accepted, waiting for grant");
+  RCLCPP_INFO(this->get_logger(), "OPUS: Sent lock goal (drone_id=%d, seq=%u)",
+              opus_drone_id_, opus_plan_sequence_);
 }
 
 void PlannerNode::opus_lock_feedback_callback(
@@ -1829,13 +1855,21 @@ void PlannerNode::opus_lock_result_callback(
 
   if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED &&
       wrapped_result.result->permitted) {
+    // Verify correlation: echoed plan_sequence must match our current round
+    if (wrapped_result.result->plan_sequence != opus_plan_sequence_) {
+      RCLCPP_WARN(this->get_logger(),
+        "OPUS: Ignoring stale lock result (seq %u, current %u)",
+        wrapped_result.result->plan_sequence, opus_plan_sequence_);
+      opus_granted_ = false;
+      return;
+    }
     opus_granted_ = true;
     opus_grant_time_ = std::chrono::steady_clock::now();
     opus_active_trajectories_.assign(
       wrapped_result.result->active_trajectories.begin(),
       wrapped_result.result->active_trajectories.end());
-    RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (%zu active trajectories)",
-                opus_active_trajectories_.size());
+    RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (seq=%u, %zu active trajectories)",
+                opus_plan_sequence_, opus_active_trajectories_.size());
   } else {
     opus_granted_ = false;
     const char* reason = "unknown";
@@ -1851,23 +1885,44 @@ void PlannerNode::opus_lock_result_callback(
 // ---- OPUS Service Response Callback ----
 
 void PlannerNode::opus_trajectory_check_response(
-    rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future) {
+    rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future,
+    uint32_t expected_seq) {
   auto response = future.get();
   const std::lock_guard<std::mutex> olock(opus_mutex_);
+
+  // Stale-response guard: if plan_sequence has moved on (due to abort/reset),
+  // this response belongs to an old planning round — discard silently.
+  if (expected_seq != opus_plan_sequence_) {
+    RCLCPP_WARN(this->get_logger(),
+      "OPUS: Discarding stale trajectory-check response (seq %u, current %u)",
+      expected_seq, opus_plan_sequence_);
+    return;
+  }
+
   opus_check_pending_ = false;
-  opus_granted_ = false;
-  opus_grant_time_ = std::chrono::steady_clock::time_point{};
-  opus_active_trajectories_.clear();
 
   if (response->accepted) {
-    RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED — executing");
+    opus_granted_ = false;
+    opus_grant_time_ = std::chrono::steady_clock::time_point{};
+    opus_active_trajectories_.clear();
+
+    RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
+                expected_seq);
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.push_back(opus_pending_trajectory_);
+    // Transition WAITING_FOR_OPUS → TRAJECTORY_CONTROL now that we have
+    // an OPUS-approved trajectory to execute.
+    if (_planner_state == PlanningStates::WAITING_FOR_OPUS) {
+      set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
+    }
   } else {
-    RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s — will re-plan",
+    RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s — retrying with lock",
                 response->reason.c_str());
+    // Lock is still held by coordinator on rejection — retry in-place
+    // without re-queuing. opus_granted_ stays true and grant_time_ is
+    // NOT reset so the local replan timeout still applies.
     opus_submission_needed_ = true;
   }
 }
@@ -1922,6 +1977,7 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
   auto msg = ground_system_msgs::msg::OpusPlanAbort();
   msg.header.stamp = this->now();
   msg.drone_id = opus_drone_id_;
+  msg.plan_sequence = opus_plan_sequence_;
   msg.reason = reason;
   opus_plan_abort_pub_->publish(msg);
 
@@ -1993,32 +2049,30 @@ void PlannerNode::opus_submit_trajectory(
   // Current state vectors in camera frame
   Eigen::Vector3d curr_pos_cam(input.current_position[0], input.current_position[1], input.current_position[2]);
   Eigen::Vector3d curr_vel_cam(input.current_velocity[0], input.current_velocity[1], input.current_velocity[2]);
-  Eigen::Vector3d curr_acc_cam(input.current_acceleration[0], input.current_acceleration[1], input.current_acceleration[2]);
 
   // Target state vectors in camera frame
   Eigen::Vector3d tgt_pos_cam(input.target_position[0], input.target_position[1], input.target_position[2]);
   Eigen::Vector3d tgt_vel_cam(input.target_velocity[0], input.target_velocity[1], input.target_velocity[2]);
-  Eigen::Vector3d tgt_acc_cam(input.target_acceleration[0], input.target_acceleration[1], input.target_acceleration[2]);
 
   // Transform to world frame (ENU)
   Eigen::Vector3d curr_pos_world = transform_camera_to_world(curr_pos_cam, body_to_world, true, world_position);
   Eigen::Vector3d curr_vel_world = transform_camera_to_world(curr_vel_cam, body_to_world, false, world_position);
-  Eigen::Vector3d curr_acc_world = transform_camera_to_world(curr_acc_cam, body_to_world, false, world_position);
 
   Eigen::Vector3d tgt_pos_world = transform_camera_to_world(tgt_pos_cam, body_to_world, true, world_position);
   Eigen::Vector3d tgt_vel_world = transform_camera_to_world(tgt_vel_cam, body_to_world, false, world_position);
-  Eigen::Vector3d tgt_acc_world = transform_camera_to_world(tgt_acc_cam, body_to_world, false, world_position);
 
   // Pack into message (world frame - ENU coordinates)
+  // MIDI uses acceleration-input trajectories: only position, velocity,
+  // max_velocity, and max_acceleration are set. current_acceleration,
+  // target_acceleration, and max_jerk are left at zero so the coordinator
+  // reconstructs the same trajectory type (ruckig acceleration-input).
   msg.current_position[0] = curr_pos_world.x();
   msg.current_position[1] = curr_pos_world.y();
   msg.current_position[2] = curr_pos_world.z();
   msg.current_velocity[0] = curr_vel_world.x();
   msg.current_velocity[1] = curr_vel_world.y();
   msg.current_velocity[2] = curr_vel_world.z();
-  msg.current_acceleration[0] = curr_acc_world.x();
-  msg.current_acceleration[1] = curr_acc_world.y();
-  msg.current_acceleration[2] = curr_acc_world.z();
+  // current_acceleration left at 0 — acceleration-input trajectory
 
   msg.target_position[0] = tgt_pos_world.x();
   msg.target_position[1] = tgt_pos_world.y();
@@ -2026,25 +2080,36 @@ void PlannerNode::opus_submit_trajectory(
   msg.target_velocity[0] = tgt_vel_world.x();
   msg.target_velocity[1] = tgt_vel_world.y();
   msg.target_velocity[2] = tgt_vel_world.z();
-  msg.target_acceleration[0] = tgt_acc_world.x();
-  msg.target_acceleration[1] = tgt_acc_world.y();
-  msg.target_acceleration[2] = tgt_acc_world.z();
+  // target_acceleration left at 0 — acceleration-input trajectory
 
-  // Max constraints remain the same (frame-independent magnitudes)
-  for (int i = 0; i < 3; i++) {
-    msg.max_velocity[i] = input.max_velocity[i];
-    msg.max_acceleration[i] = input.max_acceleration[i];
-    msg.max_jerk[i] = input.max_jerk[i];
-  }
+  // Transform per-axis kinematic limits from camera frame (RDF) to world frame (ENU).
+  // Camera RDF: [0]=right, [1]=down, [2]=forward
+  // Body FLU:   x=cam[2], y=cam[0], z=cam[1]
+  // World ENU:  yaw rotation mixes body x,y -> world x,y; body z -> world z
+  // So world XY limit = max(cam[0], cam[2]), world Z limit = cam[1]
+  double max_vel_xy = std::max(input.max_velocity[0], input.max_velocity[2]);
+  double max_acc_xy = std::max(input.max_acceleration[0], input.max_acceleration[2]);
+  msg.max_velocity[0] = max_vel_xy;
+  msg.max_velocity[1] = max_vel_xy;
+  msg.max_velocity[2] = input.max_velocity[1];     // cam down -> world up
+  msg.max_acceleration[0] = max_acc_xy;
+  msg.max_acceleration[1] = max_acc_xy;
+  msg.max_acceleration[2] = input.max_acceleration[1];
+  // max_jerk left at 0 — acceleration-input trajectory (no jerk constraint)
 
   msg.start_time = this->now().seconds();
   msg.duration = traj.get_duration();
 
   auto request = std::make_shared<ground_system_msgs::srv::OpusTrajectoryCheck::Request>();
   request->drone_id = opus_drone_id_;
+  request->plan_sequence = opus_plan_sequence_;
   request->trajectory = msg;
+  // Capture current sequence so the response callback can detect staleness
+  uint32_t seq = opus_plan_sequence_;
   opus_traj_check_client_->async_send_request(request,
-    std::bind(&PlannerNode::opus_trajectory_check_response, this, std::placeholders::_1));
+    [this, seq](rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture f) {
+      opus_trajectory_check_response(f, seq);
+    });
 
   RCLCPP_INFO(this->get_logger(),
     "OPUS: Submitted trajectory (world: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f], dur=%.2fs)",
@@ -2076,6 +2141,76 @@ ground_system_msgs::msg::RuckigTrajectory PlannerNode::ruckig_input_to_msg(
   return msg;
 }
 
+// Decompose a ruckig Trajectory<3> into SecondOrderSegments parameterized
+// in global time (offset by time_offset from some common reference).
+// Mirrors DuPlanner::get_segments but uses global-time polynomial coefficients
+// so that segments from different trajectories share a common time axis.
+static std::vector<SecondOrderSegment> ruckig_to_global_segments(
+    const ruckig::Trajectory<3>& traj, double time_offset) {
+  std::vector<SecondOrderSegment> segments;
+
+  auto profile_array = traj.get_profiles();
+  assert(profile_array.size() == 1);
+  auto profiles = profile_array[0];
+  assert(profiles.size() == 3);
+
+  double cumulative_time = time_offset;
+
+  // Brake sub-profile (pre-trajectory)
+  double brake_dur = profiles[0].brake.duration;
+  if (brake_dur > 1e-6) {
+    double T0 = cumulative_time;
+    Eigen::Vector3d a(profiles[0].brake.a[0], profiles[1].brake.a[0], profiles[2].brake.a[0]);
+    Eigen::Vector3d v0(profiles[0].brake.v[0], profiles[1].brake.v[0], profiles[2].brake.v[0]);
+    Eigen::Vector3d p0(profiles[0].brake.p[0], profiles[1].brake.p[0], profiles[2].brake.p[0]);
+    Eigen::Vector3d half_a = a / 2.0;
+    segments.emplace_back(
+        std::vector<Eigen::Vector3d>{
+            half_a,
+            v0 - a * T0,
+            p0 - v0 * T0 + half_a * (T0 * T0)},
+        T0, T0 + brake_dur);
+    cumulative_time += brake_dur;
+  }
+
+  // Accel sub-profile (pre-trajectory)
+  double accel_dur = profiles[0].accel.duration;
+  if (accel_dur > 1e-6) {
+    double T0 = cumulative_time;
+    Eigen::Vector3d a(profiles[0].accel.a[0], profiles[1].accel.a[0], profiles[2].accel.a[0]);
+    Eigen::Vector3d v0(profiles[0].accel.v[0], profiles[1].accel.v[0], profiles[2].accel.v[0]);
+    Eigen::Vector3d p0(profiles[0].accel.p[0], profiles[1].accel.p[0], profiles[2].accel.p[0]);
+    Eigen::Vector3d half_a = a / 2.0;
+    segments.emplace_back(
+        std::vector<Eigen::Vector3d>{
+            half_a,
+            v0 - a * T0,
+            p0 - v0 * T0 + half_a * (T0 * T0)},
+        T0, T0 + accel_dur);
+    cumulative_time += accel_dur;
+  }
+
+  // 7 main phases
+  for (uint8_t i = 0; i < 7; i++) {
+    double dt = profiles[0].t[i];
+    if (dt < 1e-6) continue;
+    double T0 = cumulative_time;
+    Eigen::Vector3d a(profiles[0].a[i], profiles[1].a[i], profiles[2].a[i]);
+    Eigen::Vector3d v0(profiles[0].v[i], profiles[1].v[i], profiles[2].v[i]);
+    Eigen::Vector3d p0(profiles[0].p[i], profiles[1].p[i], profiles[2].p[i]);
+    Eigen::Vector3d half_a = a / 2.0;
+    segments.emplace_back(
+        std::vector<Eigen::Vector3d>{
+            half_a,
+            v0 - a * T0,
+            p0 - v0 * T0 + half_a * (T0 * T0)},
+        T0, T0 + dt);
+    cumulative_time += dt;
+  }
+
+  return segments;
+}
+
 bool PlannerNode::is_trajectory_safe_against_swarm(
     const ruckig::Trajectory<3>& planned_traj,
     const ruckig::InputParameter<3>& input_camera_frame,
@@ -2093,46 +2228,43 @@ bool PlannerNode::is_trajectory_safe_against_swarm(
   double planned_end_sec = planned_start_sec + planned_duration;
 
   // Build world-frame input for the planned trajectory
+  // MIDI uses acceleration-input trajectories: only position and velocity are needed.
   Eigen::Vector3d curr_pos_cam(input_camera_frame.current_position[0],
                                 input_camera_frame.current_position[1],
                                 input_camera_frame.current_position[2]);
   Eigen::Vector3d curr_vel_cam(input_camera_frame.current_velocity[0],
                                 input_camera_frame.current_velocity[1],
                                 input_camera_frame.current_velocity[2]);
-  Eigen::Vector3d curr_acc_cam(input_camera_frame.current_acceleration[0],
-                                input_camera_frame.current_acceleration[1],
-                                input_camera_frame.current_acceleration[2]);
   Eigen::Vector3d tgt_pos_cam(input_camera_frame.target_position[0],
                                input_camera_frame.target_position[1],
                                input_camera_frame.target_position[2]);
   Eigen::Vector3d tgt_vel_cam(input_camera_frame.target_velocity[0],
                                input_camera_frame.target_velocity[1],
                                input_camera_frame.target_velocity[2]);
-  Eigen::Vector3d tgt_acc_cam(input_camera_frame.target_acceleration[0],
-                               input_camera_frame.target_acceleration[1],
-                               input_camera_frame.target_acceleration[2]);
 
   // Transform to world frame
   Eigen::Vector3d curr_pos_world = transform_camera_to_world(curr_pos_cam, body_to_world, true, world_position);
   Eigen::Vector3d curr_vel_world = transform_camera_to_world(curr_vel_cam, body_to_world, false, world_position);
-  Eigen::Vector3d curr_acc_world = transform_camera_to_world(curr_acc_cam, body_to_world, false, world_position);
   Eigen::Vector3d tgt_pos_world = transform_camera_to_world(tgt_pos_cam, body_to_world, true, world_position);
   Eigen::Vector3d tgt_vel_world = transform_camera_to_world(tgt_vel_cam, body_to_world, false, world_position);
-  Eigen::Vector3d tgt_acc_world = transform_camera_to_world(tgt_acc_cam, body_to_world, false, world_position);
 
   // Build world-frame ruckig input for planned trajectory
+  // MIDI uses acceleration-input trajectories: only set position, velocity,
+  // max_velocity, and max_acceleration. Do NOT set current_acceleration,
+  // target_acceleration, or max_jerk so ruckig generates the same trajectory type.
   ruckig::InputParameter<3> planned_input_world;
   planned_input_world.current_position = {curr_pos_world.x(), curr_pos_world.y(), curr_pos_world.z()};
   planned_input_world.current_velocity = {curr_vel_world.x(), curr_vel_world.y(), curr_vel_world.z()};
-  planned_input_world.current_acceleration = {curr_acc_world.x(), curr_acc_world.y(), curr_acc_world.z()};
   planned_input_world.target_position = {tgt_pos_world.x(), tgt_pos_world.y(), tgt_pos_world.z()};
   planned_input_world.target_velocity = {tgt_vel_world.x(), tgt_vel_world.y(), tgt_vel_world.z()};
-  planned_input_world.target_acceleration = {tgt_acc_world.x(), tgt_acc_world.y(), tgt_acc_world.z()};
-  // Copy kinematic limits (frame-independent)
-  for (int i = 0; i < 3; i++) {
-    planned_input_world.max_velocity[i] = input_camera_frame.max_velocity[i];
-    planned_input_world.max_acceleration[i] = input_camera_frame.max_acceleration[i];
-    planned_input_world.max_jerk[i] = input_camera_frame.max_jerk[i];
+  // Transform per-axis kinematic limits from camera RDF to world ENU.
+  // Yaw rotation mixes body x,y → world x,y: use max(cam[0], cam[2]) for XY.
+  // World Z = cam[1].
+  {
+    double max_vel_xy = std::max(input_camera_frame.max_velocity[0], input_camera_frame.max_velocity[2]);
+    double max_acc_xy = std::max(input_camera_frame.max_acceleration[0], input_camera_frame.max_acceleration[2]);
+    planned_input_world.max_velocity = {max_vel_xy, max_vel_xy, input_camera_frame.max_velocity[1]};
+    planned_input_world.max_acceleration = {max_acc_xy, max_acc_xy, input_camera_frame.max_acceleration[1]};
   }
 
   // Regenerate trajectory in world frame
@@ -2143,6 +2275,13 @@ bool PlannerNode::is_trajectory_safe_against_swarm(
     RCLCPP_WARN(this->get_logger(), "OPUS: Failed to reconstruct planned trajectory in world frame");
     return false;  // Can't verify, reject for safety
   }
+
+  // Use overlap_start as common time reference to keep polynomial coefficients small
+  double t_ref = planned_start_sec;
+
+  // Decompose planned trajectory into global-time segments
+  std::vector<SecondOrderSegment> planned_segments =
+      ruckig_to_global_segments(planned_traj_world, planned_start_sec - t_ref);
 
   for (const auto& existing : active_trajectories) {
     if (existing.drone_id == opus_drone_id_) continue;  // Skip own trajectory
@@ -2160,13 +2299,10 @@ bool PlannerNode::is_trajectory_safe_against_swarm(
     for (int i = 0; i < 3; i++) {
       ex_input.current_position[i] = existing.current_position[i];
       ex_input.current_velocity[i] = existing.current_velocity[i];
-      ex_input.current_acceleration[i] = existing.current_acceleration[i];
       ex_input.target_position[i] = existing.target_position[i];
       ex_input.target_velocity[i] = existing.target_velocity[i];
-      ex_input.target_acceleration[i] = existing.target_acceleration[i];
       ex_input.max_velocity[i] = existing.max_velocity[i];
       ex_input.max_acceleration[i] = existing.max_acceleration[i];
-      ex_input.max_jerk[i] = existing.max_jerk[i];
     }
 
     ruckig::Ruckig<3> otg;
@@ -2179,27 +2315,21 @@ bool PlannerNode::is_trajectory_safe_against_swarm(
       return false;  // Can't verify safety, reject for safety
     }
 
-    // Sample both trajectories over the overlap at 10ms intervals
-    double dt = 0.01;
-    for (double t = overlap_start; t <= overlap_end; t += dt) {
-      double t_local_planned = t - planned_start_sec;
-      double t_local_existing = t - ex_start;
+    // Decompose existing trajectory into global-time segments (same t_ref)
+    std::vector<SecondOrderSegment> ex_segments =
+        ruckig_to_global_segments(ex_traj, ex_start - t_ref);
 
-      std::array<double, 3> pos_p, vel_p, acc_p;
-      std::array<double, 3> pos_e, vel_e, acc_e;
-      planned_traj_world.at_time(t_local_planned, pos_p, vel_p, acc_p);
-      ex_traj.at_time(t_local_existing, pos_e, vel_e, acc_e);
-
-      double dx = pos_p[0] - pos_e[0];
-      double dy = pos_p[1] - pos_e[1];
-      double dz = pos_p[2] - pos_e[2];
-      double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-      if (dist < safety_distance) {
-        RCLCPP_WARN(this->get_logger(),
-          "OPUS: Collision with Drone %d at t=%.2f (dist=%.3f < %.3f)",
-          existing.drone_id, t, dist, safety_distance);
-        return false;
+    // Closed-form minimum distance: iterate all segment pairs
+    double safety_dist_sq = safety_distance * safety_distance;
+    for (const auto& seg_p : planned_segments) {
+      for (const auto& seg_e : ex_segments) {
+        double min_dist_sq = seg_p.get_min_distance_square_to_segment(seg_e);
+        if (min_dist_sq < safety_dist_sq) {
+          RCLCPP_WARN(this->get_logger(),
+            "OPUS: Collision with Drone %d (dist=%.3f < %.3f)",
+            existing.drone_id, std::sqrt(min_dist_sq), safety_distance);
+          return false;
+        }
       }
     }
   }
