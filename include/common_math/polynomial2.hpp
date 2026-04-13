@@ -64,21 +64,19 @@ class SecondOrderPolynomial : public Polynomial {
       throw std::invalid_argument(
         "Quadratic polynomials must have exactly 3 coefficients.");
     }
+    const size_t initial_size = roots.size();
     double A = coeffs[0];
     double B = coeffs[1];
     double C = coeffs[2];
     // Contingency: if A = 0, not a quadratic = linear
-    // initialise counters for real and imaginary roots
     if (A == 0) {
       // If B is zero then we have a NaN
       if (B == 0) return 0;
       roots.push_back(-1.0 * C / B);
-      uint8_t num_roots = 1;
       if ((roots.back() < get_start_time()) || (roots.back() > get_end_time())) {
         roots.pop_back();
-        num_roots = 0;
       }
-      return num_roots;
+      return static_cast<uint8_t>(roots.size() - initial_size);
     }
 
     double discriminant = (B * B) - (4 * A * C);
@@ -98,6 +96,6 @@ class SecondOrderPolynomial : public Polynomial {
     if ((roots.back() < get_start_time()) || (roots.back() > get_end_time())) {
       roots.pop_back();
     }
-    return 2;
+    return static_cast<uint8_t>(roots.size() - initial_size);
   }
 };

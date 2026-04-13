@@ -343,6 +343,69 @@ TEST(FourthOrderPolynomial, FuzzGetMin) {
 }
 
 // ============================================================================
+// solve_roots() return value accuracy
+// ============================================================================
+
+TEST(SecondOrderPolynomial, SolveRootsReturnValueBothOutside) {
+  // (x-1)(x-3) on [1.5, 2.5] — both roots outside interval
+  SecondOrderPolynomial p({1.0, -4.0, 3.0}, 1.5, 2.5);
+  std::vector<double> roots;
+  uint8_t count = p.solve_roots(roots);
+  EXPECT_EQ(roots.size(), 0u);
+  EXPECT_EQ(count, 0u);  // return value must match vector size
+}
+
+TEST(SecondOrderPolynomial, SolveRootsReturnValueOneInside) {
+  // (x-1)(x-3) on [0.5, 1.5] — only root x=1 inside
+  SecondOrderPolynomial p({1.0, -4.0, 3.0}, 0.5, 1.5);
+  std::vector<double> roots;
+  uint8_t count = p.solve_roots(roots);
+  EXPECT_EQ(roots.size(), 1u);
+  EXPECT_EQ(count, 1u);
+  EXPECT_NEAR(roots[0], 1.0, 1e-10);
+}
+
+TEST(SecondOrderPolynomial, SolveRootsReturnValueBothInside) {
+  // (x-1)(x-3) on [0, 5] — both roots inside
+  SecondOrderPolynomial p({1.0, -4.0, 3.0}, 0.0, 5.0);
+  std::vector<double> roots;
+  uint8_t count = p.solve_roots(roots);
+  EXPECT_EQ(roots.size(), 2u);
+  EXPECT_EQ(count, 2u);
+}
+
+// ============================================================================
+// Cubic algebraic branch: near-eps imaginary part
+// ============================================================================
+
+TEST(ThirdOrderPolynomial, AlgebraicBranchNearEpsImaginary) {
+  // x^3 + 3x + 4 = 0: one real root at x ≈ -1, two complex conjugates
+  // This uses the algebraic branch (r^2 >= q^3).
+  // Verify the conjugate pair is correctly discarded.
+  ThirdOrderPolynomial p({1.0, 0.0, 3.0, 4.0}, -5.0, 5.0);
+  std::vector<double> roots;
+  p.solve_roots(roots);
+  // Should have exactly 1 real root
+  ASSERT_EQ(roots.size(), 1u);
+  // Verify it actually is a root
+  EXPECT_NEAR(p.get_value(roots[0]), 0.0, 1e-6);
+}
+
+TEST(ThirdOrderPolynomial, AlgebraicBranchDoubleRoot) {
+  // x^3 - 3x + 2 = (x-1)^2(x+2): double root at x=1, simple root at x=-2
+  // r^2 = q^3 exactly (or nearly), so the algebraic branch should handle
+  // the near-zero imaginary part correctly.
+  ThirdOrderPolynomial p({1.0, 0.0, -3.0, 2.0}, -5.0, 5.0);
+  std::vector<double> roots;
+  p.solve_roots(roots);
+  std::sort(roots.begin(), roots.end());
+  // Should find at least 2 distinct roots: -2 and 1
+  ASSERT_GE(roots.size(), 2u);
+  EXPECT_NEAR(roots[0], -2.0, 1e-4);
+  EXPECT_NEAR(roots.back(), 1.0, 1e-4);
+}
+
+// ============================================================================
 // Degenerate: near-zero leading coefficients
 // ============================================================================
 
