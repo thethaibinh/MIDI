@@ -78,7 +78,7 @@ bool PlannerNode::loadParameters() {
   // Topics
   _depth_topic = planner_config["topics"]["depth"].as<std::string>();
 
-  // Goal coordinates are set dynamically by mission upload / takeoff / fly_to commands
+  // Goal coordinates are set dynamically by mission upload / takeoff commands
   _goal_up_coordinate = 0.0;
 
   // Depth camera parameters

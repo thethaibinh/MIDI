@@ -33,7 +33,7 @@ PlannerNode::PlannerNode()
     rclcpp::CallbackGroupType::MutuallyExclusive);
   rclcpp::SubscriptionOptions state_sub_opts;
   state_sub_opts.callback_group = state_callback_group_;
-  // Mission / reset / takeoff / fly_to events mutate the same flight state
+  // Mission / reset / takeoff events mutate the same flight state
   // as control_loop (trajectory_queue_, reference_trajectory_, _goal_set,
   // planner state). Running them on control_callback_group_ serialises them
   // with the control timer so no extra locks are needed.
@@ -84,12 +84,6 @@ PlannerNode::PlannerNode()
   takeoff_sub = this->create_subscription<ground_system_msgs::msg::Takeoff>(
     "/takeoff", 10,
     std::bind(&PlannerNode::takeoff_callback, this, std::placeholders::_1),
-    control_sub_opts);
-
-  // FlyTo command subscriber - auto takeoff and fly to specified goal
-  fly_to_sub = this->create_subscription<ground_system_msgs::msg::FlyTo>(
-    "/fly_to", 10,
-    std::bind(&PlannerNode::fly_to_callback, this, std::placeholders::_1),
     control_sub_opts);
 
   reset_sub = this->create_subscription<std_msgs::msg::Empty>(
@@ -219,6 +213,6 @@ PlannerNode::PlannerNode()
 //   planner_node_tracker.cpp         — control_loop, trajectory tracking, setpoint publishing
 //   planner_node_planner.cpp         — img_callback, depth preprocessing, point cloud
 //   planner_node_opus.cpp            — OPUS coordination (lock, submit, ack, abort)
-//   planner_node_mission.cpp         — mission upload/start, takeoff, fly_to, reset, waypoints
+//   planner_node_mission.cpp         — mission upload/start, takeoff, reset, waypoints
 //   planner_node_visualiser.cpp      — visualise (point cloud, trajectory, goal markers)
 //   planner_node_parameters.cpp      — loadParameters

@@ -4,11 +4,11 @@ using namespace quadrotor_common;
 
 void PlannerNode::update_planner_state() {
   // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
-  // Trigger on either _goal_set (mission/fly_to) or takeoff_requested_ (takeoff-only)
+  // Trigger on either _goal_set (mission) or takeoff_requested_ (takeoff-only)
   if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
       (_goal_set || takeoff_requested_)) {
     
-    // Note: _goal_heading is now computed in the goal callbacks (fly_to_callback, mission_upload_callback)
+    // Note: _goal_heading is now computed in the goal callbacks (mission_upload_callback)
     // at the same time as goal position, using the same state snapshot.
     // For takeoff-only (no goal), use default heading of 0.
     if (!_goal_set) {
@@ -124,7 +124,6 @@ void PlannerNode::update_planner_state() {
 
   // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached
   // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
-  // This allows fly_to goals with different altitudes to work properly
   double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
   if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
     RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), aligning heading to goal",

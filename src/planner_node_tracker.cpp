@@ -35,6 +35,7 @@ void PlannerNode::update_reference_trajectory() {
   rclcpp::Duration trajectory_point_time = wall_time_now - _reference_trajectory_start_time;
   double point_time = trajectory_point_time.seconds();
   if (trajectory_queue_.size() > 0) {
+    bool trajectory_updated = false;
     // Only track when there is a valid trajectory
     if (!had_reference_trajectory) {
       _steered = false;
@@ -42,14 +43,34 @@ void PlannerNode::update_reference_trajectory() {
       reference_trajectory_ = trajectory_queue_.front();
       _reference_trajectory_start_time = wall_time_now;
       had_reference_trajectory = true;
+      trajectory_updated = true;
     }
     if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
       _steered = false;
       steering_value = 0.0f;
       reference_trajectory_ = trajectory_queue_.front();
       _reference_trajectory_start_time = wall_time_now;
+      trajectory_updated = true;
     }
     trajectory_queue_.pop_front();
+
+    // Compute heading from trajectory initial to terminal position in world frame
+    if (trajectory_updated) {
+      geometry_msgs::msg::TransformStamped b2w = reference_trajectory_.get_transform_to_world();
+      std::array<double, 3> init_pos, init_vel, init_acc;
+      std::array<double, 3> term_pos, term_vel, term_acc;
+      reference_trajectory_.at_time(0.0, init_pos, init_vel, init_acc);
+      reference_trajectory_.at_time(reference_trajectory_.get_duration(), term_pos, term_vel, term_acc);
+
+      geometry_msgs::msg::Point init_body, init_world, term_body, term_world;
+      frame_transform::transform_camera_to_body(init_pos, init_body);
+      frame_transform::transform_camera_to_body(term_pos, term_body);
+      tf2::doTransform(init_body, init_world, b2w);
+      tf2::doTransform(term_body, term_world, b2w);
+
+      _trajectory_heading = std::atan2(term_world.y - init_world.y,
+                                       term_world.x - init_world.x);
+    }
   }
 }
 
@@ -122,6 +143,11 @@ void PlannerNode::track_trajectory() {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
     double point_time = trajectory_point_time.seconds();
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
+  }
+
+  // In TRAJECTORY_CONTROL, face toward trajectory terminal rather than global goal
+  if (_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) {
+    reference_point.heading = _trajectory_heading;
   }
 
   // Publish position/velocity setpoint (kinematic control mode)

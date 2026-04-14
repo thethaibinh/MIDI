@@ -60,7 +60,6 @@
 #include <ground_system_msgs/msg/swarm_mission_upload.hpp>
 #include <ground_system_msgs/msg/swarm_mission_ack.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
-#include <ground_system_msgs/msg/fly_to.hpp>
 
 // OPUS coordination (services + status topic)
 #include <ground_system_msgs/msg/opus_plan_lock_request.hpp>
@@ -141,7 +140,6 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Subscription<ground_system_msgs::msg::SwarmMissionUpload>::SharedPtr mission_upload_sub;
   rclcpp::Publisher<ground_system_msgs::msg::SwarmMissionAck>::SharedPtr mission_ack_pub_;
   rclcpp::Subscription<ground_system_msgs::msg::Takeoff>::SharedPtr takeoff_sub;
-  rclcpp::Subscription<ground_system_msgs::msg::FlyTo>::SharedPtr fly_to_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
@@ -196,7 +194,6 @@ class PlannerNode : public rclcpp::Node {
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
   void mission_upload_callback(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr msg);
   void takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg);
-  void fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void img_callback(const sm::Image::SharedPtr depth_msg);
   void visualise(const sm::Image::SharedPtr depth_msg);
@@ -255,6 +252,7 @@ class PlannerNode : public rclcpp::Node {
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
   double _goal_heading;  // Heading to goal (computed once when goal is set)
+  double _trajectory_heading = 0.0;  // Heading toward trajectory terminal (updated per trajectory)
 
   // Waypoint mission tracking
   std::vector<ground_system_msgs::msg::Waypoint> _waypoint_list;  // Original FLU waypoints (for logging)
