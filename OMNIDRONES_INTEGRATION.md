@@ -101,8 +101,7 @@ cd aircraft/aircraft_ws
 source install/setup.bash
 ros2 run midi midi_planner_node --ros-args \
   -r __ns:=/Drone1 \
-  -p scenario:=omnidrones \
-  -p use_sim_time:=false
+  -p scenario:=omnidrones
 ```
 
 Or use the aircraft container with:

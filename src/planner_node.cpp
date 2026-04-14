@@ -25,6 +25,21 @@ PlannerNode::PlannerNode()
     return;
   }
 
+  // Dedicated callback groups so heavy planning in img_callback (default MX
+  // group) cannot starve state updates or the control timer.
+  state_callback_group_ = this->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
+  control_callback_group_ = this->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
+  rclcpp::SubscriptionOptions state_sub_opts;
+  state_sub_opts.callback_group = state_callback_group_;
+  // Mission / reset / takeoff / fly_to events mutate the same flight state
+  // as control_loop (trajectory_queue_, reference_trajectory_, _goal_set,
+  // planner state). Running them on control_callback_group_ serialises them
+  // with the control timer so no extra locks are needed.
+  rclcpp::SubscriptionOptions control_sub_opts;
+  control_sub_opts.callback_group = control_callback_group_;
+
   // Publishers
   point_cloud_pub = this->create_publisher<sm::PointCloud2>("/cloud_out", 10);
   visual_pub = this->create_publisher<visualization_msgs::msg::Marker>("/visualization", 10);
@@ -56,12 +71,14 @@ PlannerNode::PlannerNode()
   // Mission command subscriber (start trigger — after upload + ACK)
   mission_sub = this->create_subscription<ground_system_msgs::msg::StartSwarmMission>(
     "/start_swarm_mission", 10,
-    std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::mission_callback, this, std::placeholders::_1),
+    control_sub_opts);
 
   // Mission upload subscriber (waypoints — Phase 1, before start)
   mission_upload_sub = this->create_subscription<ground_system_msgs::msg::SwarmMissionUpload>(
     "/swarm_mission_upload", 10,
-    std::bind(&PlannerNode::mission_upload_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::mission_upload_callback, this, std::placeholders::_1),
+    control_sub_opts);
 
   // Mission ACK publisher
   mission_ack_pub_ = this->create_publisher<ground_system_msgs::msg::SwarmMissionAck>(
@@ -70,22 +87,26 @@ PlannerNode::PlannerNode()
   // Takeoff command subscriber - triggers takeoff only (no goal)
   takeoff_sub = this->create_subscription<ground_system_msgs::msg::Takeoff>(
     "/takeoff", 10,
-    std::bind(&PlannerNode::takeoff_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::takeoff_callback, this, std::placeholders::_1),
+    control_sub_opts);
 
   // FlyTo command subscriber - auto takeoff and fly to specified goal
   fly_to_sub = this->create_subscription<ground_system_msgs::msg::FlyTo>(
     "/fly_to", 10,
-    std::bind(&PlannerNode::fly_to_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::fly_to_callback, this, std::placeholders::_1),
+    control_sub_opts);
 
   reset_sub = this->create_subscription<std_msgs::msg::Empty>(
     "/reset_planner", 10,
-    std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1),
+    control_sub_opts);
 
   // Subscribe to odometry - use relative topic so namespace remapping works
   // When running in /Drone1 namespace, this becomes /Drone1/odometry
   odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(
     "odometry", 5,
-    std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1),
+    state_sub_opts);
 
   // For MAVROS mode: subscribe to pose/twist/state from MAVROS
   if (_runtime_mode == RuntimeModes::MAVROS) {
@@ -97,11 +118,13 @@ PlannerNode::PlannerNode()
     // Pose/twist also use BEST_EFFORT QoS from MAVROS
   mav_pose_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
       "/mavros/local_position/pose", mavros_qos,
-    std::bind(&PlannerNode::mav_pose_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::mav_pose_callback, this, std::placeholders::_1),
+    state_sub_opts);
 
   mav_twist_sub = this->create_subscription<geometry_msgs::msg::TwistStamped>(
       "/mavros/local_position/velocity_body", mavros_qos,
-    std::bind(&PlannerNode::mav_twist_callback, this, std::placeholders::_1));
+    std::bind(&PlannerNode::mav_twist_callback, this, std::placeholders::_1),
+    state_sub_opts);
 
     // mav_accel_sub = this->create_subscription<sensor_msgs::msg::Imu>(
     //   "/mavros/imu/data_raw", mavros_qos,
@@ -109,7 +132,8 @@ PlannerNode::PlannerNode()
 
     mav_state_sub = this->create_subscription<mavros_msgs::msg::State>(
       "/mavros/state", 10,
-      std::bind(&PlannerNode::ardupilot_status_callback, this, std::placeholders::_1));
+      std::bind(&PlannerNode::ardupilot_status_callback, this, std::placeholders::_1),
+      state_sub_opts);
 
     // MAVROS service clients (for real FC) - use absolute paths since services are at root namespace
     arming_srv = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
@@ -117,10 +141,13 @@ PlannerNode::PlannerNode()
     land_srv = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
     mode_srv = this->create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
   }
-  // Timer
+  // Timer — runs on its own MX group so planning (default group) cannot
+  // delay setpoint publication. It may run concurrently with img_callback;
+  // trajectory_mutex_ serialises access to trajectory_queue_ / _steered.
   control_loop_timer_ = this->create_wall_timer(
     std::chrono::duration<double>(_trajectory_discretisation_cycle),
-    std::bind(&PlannerNode::control_loop, this));
+    std::bind(&PlannerNode::control_loop, this),
+    control_callback_group_);
 
   // OPUS coordination setup
   // Parse drone_id from namespace (e.g. /Drone1 -> 1)
@@ -142,24 +169,39 @@ PlannerNode::PlannerNode()
   opus_enabled_ = (opus_env == nullptr) || (std::string(opus_env) != "false");
 
   if (opus_enabled_) {
-    // Reentrant callback group so OPUS action/service responses can fire
+    // Reentrant callback group so OPUS service responses can fire
     // concurrently with the high-frequency depth image callback.
     opus_callback_group_ = this->create_callback_group(
       rclcpp::CallbackGroupType::Reentrant);
 
-    // Action client for lock acquisition (queuing + cancel support)
-    opus_lock_client_ = rclcpp_action::create_client<OpusPlanLockAction>(
-      this, "/opus/plan_lock", opus_callback_group_);
-
-    // Service client for trajectory collision check
-    opus_traj_check_client_ = this->create_client<ground_system_msgs::srv::OpusTrajectoryCheck>(
-      "/opus/trajectory_check", rmw_qos_profile_services_default, opus_callback_group_);
-
-    // Topic publisher for abort (release lock after grant, before service call)
     rclcpp::QoS opus_qos(10);
     opus_qos.reliable();
+
+    // Topic publisher: lock request/cancel (no reply — coordinator responds via /opus/status)
+    opus_lock_req_pub_ = this->create_publisher<OpusPlanLockReqMsg>(
+      "/opus/plan_lock_request", opus_qos);
+
+    // Topic publisher for abort
     opus_plan_abort_pub_ = this->create_publisher<ground_system_msgs::msg::OpusPlanAbort>(
       "/opus/plan_abort", opus_qos);
+
+    // Topic publisher: trajectory submission (coordinator replies on /opus/trajectory_ack)
+    opus_traj_submit_pub_ = this->create_publisher<ground_system_msgs::msg::OpusTrajectorySubmit>(
+      "/opus/trajectory_submit", opus_qos);
+
+    // Subscription: coordinator ack of submitted trajectory
+    rclcpp::SubscriptionOptions opus_cb_opts;
+    opus_cb_opts.callback_group = opus_callback_group_;
+    opus_traj_ack_sub_ = this->create_subscription<ground_system_msgs::msg::OpusTrajectoryAck>(
+      "/opus/trajectory_ack", opus_qos,
+      std::bind(&PlannerNode::opus_trajectory_ack_callback, this, std::placeholders::_1),
+      opus_cb_opts);
+
+    // Status subscription: detects "lock granted to me"
+    opus_status_sub_ = this->create_subscription<ground_system_msgs::msg::OpusStatus>(
+      "/opus/status", opus_qos,
+      std::bind(&PlannerNode::opus_status_callback, this, std::placeholders::_1),
+      opus_cb_opts);
 
     RCLCPP_INFO(this->get_logger(), "OPUS coordination enabled (drone_id=%d)", opus_drone_id_);
   } else {
@@ -193,8 +235,6 @@ pointcloud_type* PlannerNode::create_point_cloud(const sm::Image::SharedPtr dept
   double fy = _real_focal_length;
 
   pointcloud_type* cloud (new pointcloud_type());
-  // Use node's current time for consistent TF lookup timing
-  // All nodes use wall clock (no use_sim_time in OmniDrones/real hardware)
   cloud->header.stamp     = this->now().nanoseconds() / 1000;
   cloud->header.frame_id  = _vehicle_frame;
   cloud->is_dense         = false;
@@ -265,14 +305,17 @@ void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMi
 
   _mission_name = msg->mission_name;
 
-  // Store home position before computing goal (relative waypoints use this)
-  _home_in_world_frame = _state.pose.position;
-
-  // Get initial yaw for FLU→world conversion
-  double qw = _state.pose.orientation.w;
-  double qx = _state.pose.orientation.x;
-  double qy = _state.pose.orientation.y;
-  double qz = _state.pose.orientation.z;
+  // Store home position before computing goal (relative waypoints use this).
+  // _state is written on state_callback_group_, so snapshot under the lock.
+  double qw, qx, qy, qz;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    _home_in_world_frame = _state.pose.position;
+    qw = _state.pose.orientation.w;
+    qx = _state.pose.orientation.x;
+    qy = _state.pose.orientation.y;
+    qz = _state.pose.orientation.z;
+  }
   double initial_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
                                    1.0 - 2.0 * (qy * qy + qz * qz));
 
@@ -368,7 +411,10 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
     // Simulation mode: directly start takeoff
     RCLCPP_WARN(this->get_logger(), "[SIM] Starting takeoff to %.2f m!", msg->altitude);
     set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-    _home_in_world_frame = _state.pose.position;
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      _home_in_world_frame = _state.pose.position;
+    }
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
@@ -384,29 +430,29 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
 }
 
 void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg) {
-  RCLCPP_INFO(this->get_logger(), "Received fly_to command (body FLU): Forward=%.2f, Left=%.2f, Up=%.2f", 
+  RCLCPP_INFO(this->get_logger(), "Received fly_to command (body FLU): Forward=%.2f, Left=%.2f, Up=%.2f",
               msg->x, msg->y, msg->z);
-  RCLCPP_INFO(this->get_logger(), "Current position (from _state): (%.2f, %.2f, %.2f)",
-              _state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
-  
+
   if (mission_received_) {
     RCLCPP_WARN(this->get_logger(), "Mission already in progress, ignoring fly_to command");
     return;
   }
-  
-  // FlyTo coordinates are in body frame (FLU: Forward-Left-Up)
-  // We need to rotate by current yaw to convert to world frame
-  
-  // Get current yaw from quaternion
-  double qw = _state.pose.orientation.w;
-  double qx = _state.pose.orientation.x;
-  double qy = _state.pose.orientation.y;
-  double qz = _state.pose.orientation.z;
+
+  // FlyTo coordinates are in body frame (FLU: Forward-Left-Up); rotate by
+  // current yaw to convert to world frame. Snapshot _state under its lock.
+  double qw, qx, qy, qz, current_x, current_y;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    qw = _state.pose.orientation.w;
+    qx = _state.pose.orientation.x;
+    qy = _state.pose.orientation.y;
+    qz = _state.pose.orientation.z;
+    current_x = _state.pose.position.x;
+    current_y = _state.pose.position.y;
+  }
+  RCLCPP_INFO(this->get_logger(), "Current position (from _state): (%.2f, %.2f, ...)",
+              current_x, current_y);
   double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
-  
-  // Store current position for goal computation
-  double current_x = _state.pose.position.x;
-  double current_y = _state.pose.position.y;
   
   RCLCPP_INFO(this->get_logger(), "Current yaw: %.1f deg (%.2f rad)", yaw * 180.0 / M_PI, yaw);
   
@@ -457,7 +503,10 @@ void PlannerNode::fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPt
     // Simulation mode: directly start trajectory control
     RCLCPP_WARN(this->get_logger(), "[SIM/FLY_TO] Starting navigation!");
     set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-    _home_in_world_frame = _state.pose.position;
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      _home_in_world_frame = _state.pose.position;
+    }
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
@@ -510,14 +559,18 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_pre_queue_.reset();
     opus_pending_trajectory_ = ruckig::Trajectory<3>();  // Clear stale trajectory
-    // Bump sequence so any in-flight goal-response / service-response callbacks
-    // for the old round will be detected as stale and discarded.
+    // Bump sequence so any in-flight service-response / status callbacks for
+    // the old round will be detected as stale and discarded.
     ++opus_plan_sequence_;
-    // Cancel any in-flight action goal
-    if (opus_goal_handle_) {
-      opus_lock_client_->async_cancel_goal(opus_goal_handle_);
-      opus_goal_handle_ = nullptr;
-    }
+  }
+  // Fire-and-forget CANCEL to the coordinator so any residual queue/lock
+  // entry for this drone is cleared on the GCS side too.
+  if (opus_enabled_ && opus_lock_req_pub_) {
+    OpusPlanLockReqMsg req;
+    req.drone_id = opus_drone_id_;
+    req.plan_sequence = opus_plan_sequence_;
+    req.action = OpusPlanLockReqMsg::ACTION_CANCEL;
+    opus_lock_req_pub_->publish(req);
   }
 }
 
@@ -531,8 +584,11 @@ void PlannerNode::mav_pose_callback(const geometry_msgs::msg::PoseStamped::Share
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     _state.pose = msg->pose;
-    auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp});
-    _state.t = min_stamp.seconds();
+    // Use the most recent stamp — `_state.t` reflects "when state was last
+    // observed" for the staleness check. Using min() would keep _state.t = 0
+    // until both pose AND twist have been received at least once, making the
+    // planner reject every frame during MAVROS warmup.
+    _state.t = std::max(_latest_pose_stamp, _latest_twist_stamp).seconds();
   }
 
   // Publish initial position once for GCS 3D map (MAVROS mode)
@@ -557,7 +613,7 @@ void PlannerNode::mav_twist_callback(const geometry_msgs::msg::TwistStamped::Sha
     const std::lock_guard<std::mutex> lock(state_mutex_);
     _state.velocity.linear = msg->twist.linear;
     _state.velocity.angular = msg->twist.angular;
-    _state.t = std::min(_latest_pose_stamp, _latest_twist_stamp).seconds();
+    _state.t = std::max(_latest_pose_stamp, _latest_twist_stamp).seconds();
   }
 }
 
@@ -617,6 +673,11 @@ void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg
 }
 
 void PlannerNode::update_reference_trajectory() {
+  // trajectory_queue_ is mutated by img_callback (default group) and by the
+  // OPUS service response (reentrant group); the control timer now runs on
+  // its own group, so all three can race without this lock.
+  const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+
   if (trajectory_queue_.empty()) {
     // OPUS mode: if no approved trajectory and not already requesting,
     // trigger OPUS submission so the next img_callback can submit.
@@ -646,26 +707,29 @@ void PlannerNode::update_reference_trajectory() {
   if (trajectory_queue_.size() > 0) {
     // Only track when there is a valid trajectory
     if (!had_reference_trajectory) {
-      asign_reference_trajectory(wall_time_now);
+      _steered = false;
+      steering_value = 0.0f;
+      reference_trajectory_ = trajectory_queue_.front();
+      _reference_trajectory_start_time = wall_time_now;
       had_reference_trajectory = true;
     }
     if (point_time > (reference_trajectory_.get_duration() / _replan_factor)) {
-      asign_reference_trajectory(wall_time_now);
+      _steered = false;
+      steering_value = 0.0f;
+      reference_trajectory_ = trajectory_queue_.front();
+      _reference_trajectory_start_time = wall_time_now;
     }
     trajectory_queue_.pop_front();
   }
 }
 
-void PlannerNode::asign_reference_trajectory(rclcpp::Time wall_time_now) {
-  const std::lock_guard<std::mutex> lock(trajectory_mutex_);
-  _steered = false;
-  steering_value = 0.0f;
-  reference_trajectory_ = trajectory_queue_.front();
-  _reference_trajectory_start_time = wall_time_now;
-}
-
 void PlannerNode::control_loop() {
   update_reference_trajectory();
+  // Hold state_mutex_ across the control-loop helpers: they dereference _state
+  // fields directly in multiple places, and odom/pose/twist callbacks now run
+  // on a dedicated thread. The critical section is short (no I/O, no TF
+  // lookups), so odom updates block at most for microseconds.
+  const std::lock_guard<std::mutex> lock(state_mutex_);
   update_planner_state();
   track_trajectory();
 }
@@ -1396,10 +1460,8 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       _planner_state != PlanningStates::WAITING_FOR_OPUS)
     return;
   
-  rclcpp::Time time_now = this->now();  // Wall clock (no use_sim_time)
-  
-  // Check if depth image is too old
-  // Both this->now() and depth_msg->header.stamp use wall clock
+  rclcpp::Time time_now = this->now();
+
   double depth_age = time_now.seconds() - rclcpp::Time(depth_msg->header.stamp).seconds();
   
   if (depth_age > _depth_age_threshold) {
@@ -1415,58 +1477,58 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   geometry_msgs::msg::Vector3 acceleration_world_frame;
   geometry_msgs::msg::Vector3 velocity_body_frame;
   geometry_msgs::msg::Vector3 acceleration_body_frame;
-  double state_timestamp;  // Store state timestamp for staleness check
+  double state_timestamp;
 
+  // Snapshot _state under the lock, then release. TF2 has its own internal
+  // lock, so holding state_mutex_ across TF2 / doTransform calls would only
+  // serialise odom updates against planning for no benefit.
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
-    // Check if state data is too old before using for planning
     state_timestamp = _state.t;
-    double state_age = time_now.seconds() - state_timestamp;
-    if (state_age > _state_age_threshold) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "State data too old (%.3f s > %.3f s threshold), rejecting",
-            state_age, _state_age_threshold);
-      return;
-    }
-    
-    // Lookup for transforms in the TF2 transforming tree
-
-    try {
-      body_to_world = to_world_buffer->lookupTransform(
-        _world_frame, _vehicle_frame, tf2::TimePointZero);
-      world_to_body = to_vehicle_buffer->lookupTransform(
-        _vehicle_frame, _world_frame, tf2::TimePointZero);
-    } catch (tf2::TransformException& ex) {
-      RCLCPP_WARN(this->get_logger(), "%s", ex.what());
-      return;
-    }
-    
-    // Check if transforms are too old
-    rclcpp::Time body_to_world_time = rclcpp::Time(body_to_world.header.stamp);
-    rclcpp::Time world_to_body_time = rclcpp::Time(world_to_body.header.stamp);
-    double b2w_age = (time_now - body_to_world_time).seconds();
-    double w2b_age = (time_now - world_to_body_time).seconds();
-    if (b2w_age > _transform_age_threshold || w2b_age > _transform_age_threshold) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "Transform too old (b2w: %.3f s, w2b: %.3f s > %.3f s threshold), rejecting",
-            b2w_age, w2b_age, _transform_age_threshold);
-      return;
-    }
-    
     position_world_frame = _state.pose.position;
     if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-      // OmniDrones: velocity and acceleration are in world frame (ENU)
       velocity_world_frame = _state.velocity.linear;
       acceleration_world_frame = _state.acceleration.linear;
-      tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
-      tf2::doTransform(acceleration_world_frame, acceleration_body_frame, world_to_body);
     } else if (_runtime_mode == RuntimeModes::MAVROS) {
-      // in MAVROS, raw velocity and acceleration are in FLU (body frame)
       velocity_body_frame = _state.velocity.linear;
       acceleration_body_frame = _state.acceleration.linear;
     }
-    tf2::doTransform(acceleration_body_frame, acceleration_world_frame, body_to_world);
   }
+
+  double state_age = time_now.seconds() - state_timestamp;
+  if (state_age > _state_age_threshold) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "State data too old (%.3f s > %.3f s threshold), rejecting",
+          state_age, _state_age_threshold);
+    return;
+  }
+
+  try {
+    body_to_world = to_world_buffer->lookupTransform(
+      _world_frame, _vehicle_frame, tf2::TimePointZero);
+    world_to_body = to_vehicle_buffer->lookupTransform(
+      _vehicle_frame, _world_frame, tf2::TimePointZero);
+  } catch (tf2::TransformException& ex) {
+    RCLCPP_WARN(this->get_logger(), "%s", ex.what());
+    return;
+  }
+
+  rclcpp::Time body_to_world_time = rclcpp::Time(body_to_world.header.stamp);
+  rclcpp::Time world_to_body_time = rclcpp::Time(world_to_body.header.stamp);
+  double b2w_age = (time_now - body_to_world_time).seconds();
+  double w2b_age = (time_now - world_to_body_time).seconds();
+  if (b2w_age > _transform_age_threshold || w2b_age > _transform_age_threshold) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+          "Transform too old (b2w: %.3f s, w2b: %.3f s > %.3f s threshold), rejecting",
+          b2w_age, w2b_age, _transform_age_threshold);
+    return;
+  }
+
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
+    tf2::doTransform(acceleration_world_frame, acceleration_body_frame, world_to_body);
+  }
+  tf2::doTransform(acceleration_body_frame, acceleration_world_frame, body_to_world);
 
   if (acceleration_world_frame.x > _acc_planning_threshold || acceleration_world_frame.y > _acc_planning_threshold)
     return;
@@ -1563,12 +1625,12 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     else if (opus_granted_) {
       opus_ready_to_submit = true;
     }
-    // If lock not requested yet — send action goal
+    // If lock not requested yet — send service request
     else if (!opus_lock_pending_) {
-      opus_send_lock_goal();
-      // Plan locally below while waiting for lock
+      opus_send_lock_request();
+      // Plan locally below while waiting for grant via /opus/status
     }
-    // Lock pending (action goal in flight) — plan locally below
+    // Lock pending (request in flight) — plan locally below
   }
 
   // OPUS fast-path: if granted, try submitting the latest pre-queued
@@ -1586,7 +1648,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 
     if (have_entry) {
       RCLCPP_INFO(this->get_logger(),
-        "OPUS: Submitting pre-queued trajectory via service (GCS collision check)");
+        "OPUS: Submitting pre-queued trajectory (GCS collision check)");
       opus_submit_trajectory(fast_entry.trajectory,
                              fast_entry.body_to_world, fast_entry.world_position);
       {
@@ -1596,7 +1658,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
         opus_submission_needed_ = false;
         opus_pre_queue_.reset();
       }
-      return;  // Submitted via service, wait for response
+      return;  // Submitted — wait for ack on /opus/trajectory_ack
     }
     // Pre-queue empty — plan fresh below, then submit
   }
@@ -1661,138 +1723,103 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 // OPUS Coordination Functions
 // ============================================================================
 
-// ---- OPUS Action Client Callbacks ----
+// ---- OPUS Lock Request Publisher + Status Subscription ----
+//
+// Fully topic-based protocol: publish a lock request, watch /opus/status for
+// the grant. No ROS2 services or actions on the lock path — zenoh v1.7.1
+// drops short service/action replies with a "less than 20 bytes" framing bug.
+//   1. opus_send_lock_request() publishes OpusPlanLockRequest (REQUEST).
+//   2. opus_status_callback() watches /opus/status; flips opus_granted_ when
+//      planning_drone_id == my drone_id.
+//   3. Agent publishes trajectory on /opus/trajectory_submit; coordinator
+//      broadcasts result on /opus/trajectory_ack (filtered by drone_id).
 
-void PlannerNode::opus_send_lock_goal() {
-  if (!opus_lock_client_->wait_for_action_server(std::chrono::milliseconds(100))) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-      "OPUS: Action server not available, will retry");
-    return;
-  }
-
+void PlannerNode::opus_send_lock_request() {
   ++opus_plan_sequence_;  // New planning round
 
-  auto goal_msg = OpusPlanLockAction::Goal();
-  goal_msg.drone_id = opus_drone_id_;
-  goal_msg.plan_sequence = opus_plan_sequence_;
+  OpusPlanLockReqMsg req;
+  req.drone_id = opus_drone_id_;
+  req.plan_sequence = opus_plan_sequence_;
+  req.action = OpusPlanLockReqMsg::ACTION_REQUEST;
 
-  auto send_goal_options = rclcpp_action::Client<OpusPlanLockAction>::SendGoalOptions();
-  // Capture sequence for the goal-response callback to detect stale responses
-  uint32_t sent_seq = opus_plan_sequence_;
-  send_goal_options.goal_response_callback =
-    [this, sent_seq](const OpusPlanLockGoalHandle::SharedPtr& goal_handle) {
-      const std::lock_guard<std::mutex> lock(opus_mutex_);
-      if (sent_seq != opus_plan_sequence_) {
-        // Stale response from a previous round — cancel immediately if accepted
-        if (goal_handle) {
-          opus_lock_client_->async_cancel_goal(goal_handle);
-        }
-        RCLCPP_WARN(this->get_logger(),
-          "OPUS: Ignoring stale goal response (seq %u, current %u)",
-          sent_seq, opus_plan_sequence_);
-        return;
-      }
-      if (!goal_handle) {
-        RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal was rejected by coordinator");
-        opus_lock_pending_ = false;
-        return;
-      }
-      opus_goal_handle_ = goal_handle;
-      RCLCPP_INFO(this->get_logger(), "OPUS: Lock goal accepted, waiting for grant");
-    };
-  send_goal_options.feedback_callback =
-    std::bind(&PlannerNode::opus_lock_feedback_callback, this, std::placeholders::_1, std::placeholders::_2);
-  send_goal_options.result_callback =
-    std::bind(&PlannerNode::opus_lock_result_callback, this, std::placeholders::_1);
-
-  opus_lock_client_->async_send_goal(goal_msg, send_goal_options);
+  opus_lock_req_pub_->publish(req);
   opus_lock_pending_ = true;
-  RCLCPP_INFO(this->get_logger(), "OPUS: Sent lock goal (drone_id=%d, seq=%u)",
+  RCLCPP_INFO(this->get_logger(), "OPUS: Sent lock request (drone_id=%d, seq=%u)",
               opus_drone_id_, opus_plan_sequence_);
 }
 
-void PlannerNode::opus_lock_feedback_callback(
-    OpusPlanLockGoalHandle::SharedPtr,
-    const std::shared_ptr<const OpusPlanLockAction::Feedback> feedback) {
-  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "OPUS: Queued at position %d", feedback->queue_position);
-}
-
-void PlannerNode::opus_lock_result_callback(
-    const OpusPlanLockGoalHandle::WrappedResult& wrapped_result) {
+void PlannerNode::opus_status_callback(
+    const ground_system_msgs::msg::OpusStatus::SharedPtr msg) {
   const std::lock_guard<std::mutex> lock(opus_mutex_);
-  opus_lock_pending_ = false;
-  opus_goal_handle_ = nullptr;
 
-  if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED &&
-      wrapped_result.result->permitted) {
-    // Verify correlation: echoed plan_sequence must match our current round
-    if (wrapped_result.result->plan_sequence != opus_plan_sequence_) {
-      RCLCPP_WARN(this->get_logger(),
-        "OPUS: Ignoring stale lock result (seq %u, current %u)",
-        wrapped_result.result->plan_sequence, opus_plan_sequence_);
-      opus_granted_ = false;
-      return;
-    }
+  // Detect grant transition: we requested a lock, and the coordinator now
+  // reports *us* as the holder.
+  if (opus_lock_pending_ && msg->planning_drone_id == opus_drone_id_) {
+    opus_lock_pending_ = false;
     opus_granted_ = true;
     opus_grant_time_ = std::chrono::steady_clock::now();
-    RCLCPP_INFO(this->get_logger(), "OPUS: Planning lock GRANTED (seq=%u)",
-                opus_plan_sequence_);
-  } else {
+    RCLCPP_INFO(this->get_logger(),
+      "OPUS: Planning lock GRANTED via status (seq=%u)", opus_plan_sequence_);
+    return;
+  }
+
+  // Detect involuntary loss of lock (coordinator reset / timeout). If we
+  // thought we were granted but coordinator now shows someone else (or 0),
+  // clear our state so the next replan cycle re-requests.
+  if (opus_granted_ && msg->planning_drone_id != opus_drone_id_) {
+    RCLCPP_WARN(this->get_logger(),
+      "OPUS: Lost lock (coordinator now holds for drone %u) — clearing state",
+      msg->planning_drone_id);
     opus_granted_ = false;
-    const char* reason = "unknown";
-    switch (wrapped_result.code) {
-      case rclcpp_action::ResultCode::CANCELED: reason = "cancelled"; break;
-      case rclcpp_action::ResultCode::ABORTED:  reason = "aborted"; break;
-      default: break;
-    }
-    RCLCPP_WARN(this->get_logger(), "OPUS: Lock goal not granted (%s)", reason);
+    opus_check_pending_ = false;
+    opus_submission_needed_ = false;
+    opus_grant_time_ = std::chrono::steady_clock::time_point{};
+    opus_pre_queue_.reset();
   }
 }
 
-// ---- OPUS Service Response Callback ----
+// ---- OPUS Trajectory Ack Callback ----
 
-void PlannerNode::opus_trajectory_check_response(
-    rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture future,
-    uint32_t expected_seq) {
-  auto response = future.get();
+void PlannerNode::opus_trajectory_ack_callback(
+    const ground_system_msgs::msg::OpusTrajectoryAck::SharedPtr msg) {
+  // Acks are broadcast — ignore those that aren't for us.
+  if (msg->drone_id != opus_drone_id_) {
+    return;
+  }
+
   const std::lock_guard<std::mutex> olock(opus_mutex_);
 
-  // Stale-response guard: if plan_sequence has moved on (due to abort/reset),
-  // this response belongs to an old planning round — discard silently.
-  if (expected_seq != opus_plan_sequence_) {
+  // Stale-ack guard: plan_sequence has moved on (abort/reset) → discard silently.
+  if (msg->plan_sequence != opus_plan_sequence_) {
     RCLCPP_WARN(this->get_logger(),
-      "OPUS: Discarding stale trajectory-check response (seq %u, current %u)",
-      expected_seq, opus_plan_sequence_);
+      "OPUS: Discarding stale trajectory ack (seq %u, current %u)",
+      msg->plan_sequence, opus_plan_sequence_);
     return;
   }
 
   opus_check_pending_ = false;
 
-  if (response->accepted) {
+  if (msg->accepted) {
     opus_granted_ = false;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
 
     RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
-                expected_seq);
+                msg->plan_sequence);
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.push_back(opus_pending_trajectory_);
-    // Transition WAITING_FOR_OPUS → TRAJECTORY_CONTROL now that we have
-    // an OPUS-approved trajectory to execute.
     if (_planner_state == PlanningStates::WAITING_FOR_OPUS) {
       set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
     }
   } else {
     RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s",
-                response->reason.c_str());
-    // On collision rejection the GCS retains the lock — we can retry with
-    // a new trajectory. On structural rejection (stale seq, lock not held)
-    // the GCS releases the lock — clear OPUS state to re-request.
-    // Detect structural rejection by checking if reason mentions "Stale" or "Lock not held".
-    bool structural = (response->reason.find("Stale") != std::string::npos ||
-                       response->reason.find("Lock not held") != std::string::npos);
+                msg->reason.c_str());
+    // Structural rejection (stale seq, lock not held) → GCS already released
+    // the lock; clear state so we re-request. Collision rejection → lock
+    // retained, retry with a new trajectory next frame.
+    bool structural = (msg->reason.find("Stale") != std::string::npos ||
+                       msg->reason.find("Lock not held") != std::string::npos);
     if (structural) {
       opus_granted_ = false;
       opus_lock_pending_ = false;
@@ -1800,7 +1827,6 @@ void PlannerNode::opus_trajectory_check_response(
       opus_grant_time_ = std::chrono::steady_clock::time_point{};
       opus_pre_queue_.reset();
     }
-    // On collision rejection: opus_granted_ stays true, agent retries next frame
   }
 }
 
@@ -1824,21 +1850,17 @@ bool PlannerNode::opus_should_abort_replanning(double* elapsed_sec) {
 
 void PlannerNode::opus_abort_planning(const std::string& reason) {
   double elapsed = 0.0;
+  bool was_queued_or_granted = false;
   {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
     if (!opus_enabled_ || !(opus_granted_ || opus_lock_pending_)) {
       return;
     }
 
+    was_queued_or_granted = true;
     if (opus_granted_) {
       elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - opus_grant_time_).count();
-    }
-
-    // Cancel in-flight action goal (handles queue-phase abort)
-    if (opus_goal_handle_) {
-      opus_lock_client_->async_cancel_goal(opus_goal_handle_);
-      opus_goal_handle_ = nullptr;
     }
 
     opus_granted_ = false;
@@ -1849,7 +1871,17 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
     opus_pre_queue_.reset();
   }
 
-  // Publish abort topic (for post-grant abort when coordinator has already released the action)
+  // Publish CANCEL on the lock-request topic so the coordinator dequeues us
+  // or releases the lock.
+  if (was_queued_or_granted && opus_lock_req_pub_) {
+    OpusPlanLockReqMsg req;
+    req.drone_id = opus_drone_id_;
+    req.plan_sequence = opus_plan_sequence_;
+    req.action = OpusPlanLockReqMsg::ACTION_CANCEL;
+    opus_lock_req_pub_->publish(req);
+  }
+
+  // Also publish OpusPlanAbort — belt-and-braces + carries the reason string.
   auto msg = ground_system_msgs::msg::OpusPlanAbort();
   msg.header.stamp = this->now();
   msg.drone_id = opus_drone_id_;
@@ -1989,16 +2021,11 @@ void PlannerNode::opus_submit_trajectory(
   msg.duration = traj.get_duration();
   msg.start_time = 0.0;  // GCS stamps this on accept
 
-  auto request = std::make_shared<ground_system_msgs::srv::OpusTrajectoryCheck::Request>();
-  request->drone_id = opus_drone_id_;
-  request->plan_sequence = opus_plan_sequence_;
-  request->trajectory = msg;
-  // Capture current sequence so the response callback can detect staleness
-  uint32_t seq = opus_plan_sequence_;
-  opus_traj_check_client_->async_send_request(request,
-    [this, seq](rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedFuture f) {
-      opus_trajectory_check_response(f, seq);
-    });
+  ground_system_msgs::msg::OpusTrajectorySubmit submit;
+  submit.drone_id = opus_drone_id_;
+  submit.plan_sequence = opus_plan_sequence_;
+  submit.trajectory = msg;
+  opus_traj_submit_pub_->publish(submit);
 
   RCLCPP_INFO(this->get_logger(),
     "OPUS: Submitted trajectory (target=[%.2f,%.2f,%.2f], dur=%.2fs, %zu phases)",

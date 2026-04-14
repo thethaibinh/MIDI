@@ -40,9 +40,9 @@ sampled_trajectories_threshold: 20000    # Lowered for OmniDrones simulation
 checked_trajectories_threshold: 200    # Lowered - accept trajectory once we have 3 checked
 
 # Data freshness thresholds
-depth_age_threshold: 0.3            # Max age of depth image (seconds) before rejection
-state_age_threshold: 0.3            # Max age of state estimate (seconds) before rejection
-transform_age_threshold: 0.3        # Max age of TF transforms (seconds) before rejection
+depth_age_threshold: 0.1            # Max age of depth image (seconds) before rejection
+state_age_threshold: 0.1            # Max age of state estimate (seconds) before rejection
+transform_age_threshold: 0.1        # Max age of TF transforms (seconds) before rejection
 
 3d_planning: yes                 # Use 3D planning
 2d_z_margin: 0.2
