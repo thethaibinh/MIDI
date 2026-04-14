@@ -30,18 +30,6 @@ void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMi
     return;
   }
 
-  // Extract trial ID from mission name if it's a benchmark trial
-  if (msg->mission_name.find("benchmark_trial_") == 0) {
-    try {
-      _current_trial_id = std::stoi(msg->mission_name.substr(16));
-      RCLCPP_INFO(this->get_logger(), "Benchmark trial %d", _current_trial_id);
-    } catch (...) {
-      _current_trial_id++;
-    }
-  } else {
-    _current_trial_id++;
-  }
-
   _mission_name = msg->mission_name;
 
   // Store home position before computing goal (relative waypoints use this).

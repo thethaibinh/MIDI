@@ -248,43 +248,16 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   _planner_state.store(new_state, std::memory_order_release);
 
   std::string state_name;
-  uint8_t benchmark_status = 0;  // IN_PROGRESS
   switch (new_state) {
-    case PlanningStates::OFF:
-      state_name = "OFF";
-      break;
-    case PlanningStates::TAKING_OFF:
-      state_name = "TAKING_OFF";
-      _trial_start_time = time_now;  // Start benchmark timer
-      _trial_started = true;
-      break;
-    case PlanningStates::ALIGNING_HEADING:
-      state_name = "ALIGNING_HEADING";
-      break;
-    case PlanningStates::WAITING_FOR_OPUS:
-      state_name = "WAITING_FOR_OPUS";
-      break;
-    case PlanningStates::TRAJECTORY_CONTROL:
-      state_name = "TRAJECTORY_CONTROL";
-      break;
-    case PlanningStates::GO_TO_GOAL:
-      state_name = "GO_TO_GOAL";
-      benchmark_status = 1;  // GOAL_REACHED
-      break;
-    case PlanningStates::HOLDING_WAYPOINT:
-      state_name = "HOLDING_WAYPOINT";
-      break;
-    case PlanningStates::LAND:
-      state_name = "LAND";
-      benchmark_status = 1;  // GOAL_REACHED (landing is success)
-      break;
-    case PlanningStates::FINISHED:
-      state_name = "FINISHED";
-      benchmark_status = 1;
-      break;
+    case PlanningStates::OFF:               state_name = "OFF"; break;
+    case PlanningStates::TAKING_OFF:        state_name = "TAKING_OFF"; break;
+    case PlanningStates::ALIGNING_HEADING:  state_name = "ALIGNING_HEADING"; break;
+    case PlanningStates::WAITING_FOR_OPUS:  state_name = "WAITING_FOR_OPUS"; break;
+    case PlanningStates::TRAJECTORY_CONTROL: state_name = "TRAJECTORY_CONTROL"; break;
+    case PlanningStates::GO_TO_GOAL:        state_name = "GO_TO_GOAL"; break;
+    case PlanningStates::HOLDING_WAYPOINT:  state_name = "HOLDING_WAYPOINT"; break;
+    case PlanningStates::LAND:              state_name = "LAND"; break;
+    case PlanningStates::FINISHED:          state_name = "FINISHED"; break;
   }
   RCLCPP_WARN(this->get_logger(), "Switched to %s state", state_name.c_str());
-  
-  // Publish benchmark status on state transitions
-  publish_benchmark_status(benchmark_status);
 }

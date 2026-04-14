@@ -44,10 +44,6 @@ PlannerNode::PlannerNode()
   point_cloud_pub = this->create_publisher<sm::PointCloud2>("/cloud_out", 10);
   visual_pub = this->create_publisher<visualization_msgs::msg::Marker>("/visualization", 10);
 
-  // Benchmark status publisher (for automated testing)
-  benchmark_status_pub = this->create_publisher<ground_system_msgs::msg::BenchmarkStatus>(
-    "/benchmark/planner_status", 10);
-
   // Publishers based on runtime mode
   if (_runtime_mode == RuntimeModes::MAVROS) {
     // MAVROS runs at root namespace — use absolute topic path

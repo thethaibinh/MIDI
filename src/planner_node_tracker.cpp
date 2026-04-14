@@ -299,31 +299,3 @@ void PlannerNode::get_reference_point_at_time(
   reference_point.acceleration = geometryToEigen(acceleration_in_world_frame);
   reference_point.jerk = geometryToEigen(jerk_in_world_frame);
 }
-
-void PlannerNode::publish_benchmark_status(uint8_t status) {
-  auto msg = ground_system_msgs::msg::BenchmarkStatus();
-  msg.header.stamp = this->now();
-  msg.trial_id = _current_trial_id;
-  msg.drone_id = opus_drone_id_;
-  msg.status = status;
-  
-  msg.position.x = _state.pose.position.x;
-  msg.position.y = _state.pose.position.y;
-  msg.position.z = _state.pose.position.z;
-  
-  msg.goal.x = _goal_in_world_frame.x;
-  msg.goal.y = _goal_in_world_frame.y;
-  msg.goal.z = _goal_in_world_frame.z;
-  
-  Eigen::Vector3d pos(_state.pose.position.x, _state.pose.position.y, _state.pose.position.z);
-  Eigen::Vector3d goal(_goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z);
-  msg.distance_to_goal = (pos - goal).norm();
-  
-  if (_trial_started) {
-    msg.elapsed_time = (this->now() - _trial_start_time).seconds();
-  } else {
-    msg.elapsed_time = 0.0;
-  }
-  
-  benchmark_status_pub->publish(msg);
-}

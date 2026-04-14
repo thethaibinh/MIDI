@@ -59,7 +59,6 @@
 #include <ground_system_msgs/msg/start_swarm_mission.hpp>
 #include <ground_system_msgs/msg/swarm_mission_upload.hpp>
 #include <ground_system_msgs/msg/swarm_mission_ack.hpp>
-#include <ground_system_msgs/msg/benchmark_status.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
 #include <ground_system_msgs/msg/fly_to.hpp>
 
@@ -133,7 +132,6 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_pub;
   rclcpp::Publisher<sm::PointCloud2>::SharedPtr point_cloud_pub;
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr raw_ref_pos_pub;
-  rclcpp::Publisher<ground_system_msgs::msg::BenchmarkStatus>::SharedPtr benchmark_status_pub;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr initial_position_pub_;
   bool initial_position_published_ = false;
   
@@ -222,9 +220,6 @@ class PlannerNode : public rclcpp::Node {
   bool loadParameters();
   void set_auto_pilot_state_forced(const PlanningStates& new_state);
   pointcloud_type* create_point_cloud(const sm::Image::SharedPtr depth_msg);
-  
-  // Benchmark helpers
-  void publish_benchmark_status(uint8_t status);
 
   // OPUS coordination helpers
   using OpusPlanLockReqMsg = ground_system_msgs::msg::OpusPlanLockRequest;
@@ -308,11 +303,6 @@ class PlannerNode : public rclcpp::Node {
   Eigen::Vector3d _last_valid_position{0.0, 0.0, 0.0};
   double _last_valid_heading{0.0};
   bool _has_valid_setpoint{false};
-  
-  // Benchmark tracking
-  int32_t _current_trial_id = 0;
-  rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
-  bool _trial_started = false;
 
   // Dedicated callback groups so the heavy img_callback (default group) cannot
   // block odometry/pose/twist updates or the control-loop timer. Without this
