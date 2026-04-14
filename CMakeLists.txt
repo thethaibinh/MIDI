@@ -64,7 +64,15 @@ add_library(${PROJECT_NAME} SHARED
   src/du_planner.cpp
   src/planner_node.cpp
   src/planner_node_parameters.cpp
+  src/planner_node_state_callbacks.cpp
+  src/planner_node_state_machine.cpp
+  src/planner_node_tracker.cpp
+  src/planner_node_planner.cpp
+  src/planner_node_opus.cpp
+  src/planner_node_mission.cpp
+  src/planner_node_visualiser.cpp
 )
+
 
 target_link_libraries(${PROJECT_NAME}
   ruckig
