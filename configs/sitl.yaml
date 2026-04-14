@@ -9,10 +9,6 @@ vehicle_frame_name: "base_link"
 # Planning parameters
 topics:
   depth: "/d435/depth/image_rect_raw"
-goal_coordinate: # World coordinates in meters
-  north: 5.6
-  west: 0.0
-  up: 1.0
 depth_camera:
   # RealSense D435 depth camera
   depth_scale: 0.001
@@ -42,11 +38,16 @@ replan_factor: 3.0
 debug_num_trajectories: yes
 openmp_chunk_size: 16
 
+# Data freshness thresholds
+depth_age_threshold: 0.09
+state_age_threshold: 0.06
+transform_age_threshold: 0.05
+
 # Collision checking parameters
 true_vehicle_radius: 0.16
 planning_vehicle_radius: 0.20
 minimum_clear_distance: 1.0
-collision_probability_threshold: 5
+collision_probability_threshold: 5.0
 
 # Fence/world limits (keep drone within safe bounds)
 fence_limits:

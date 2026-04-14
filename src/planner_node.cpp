@@ -34,29 +34,22 @@ PlannerNode::PlannerNode()
     "/benchmark/planner_status", 10);
 
   // Publishers based on runtime mode
-  if (_runtime_mode == RuntimeModes::MAVROS || _runtime_mode == RuntimeModes::OMNIDRONES) {
-    // Position/velocity/acceleration setpoints (PositionTarget)
-    // Use absolute path since MAVROS is at root namespace, not Drone1 namespace
-    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", 10);
-  }
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // Velocity-only setpoints (TwistStamped) - alternative control mode
-    vel_cmd_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>("mavros/setpoint_velocity/cmd_vel", 10);
-  }
   if (_runtime_mode == RuntimeModes::MAVROS) {
-    // Throttled odom for zenoh bridge (100Hz -> 10Hz)
-    odom_throttled_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
-      "/mavros/local_position/odom_throttled", 5);
+    // MAVROS runs at root namespace — use absolute topic path
+    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", 10);
+  } else if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones subscribes to /Drone{i}/mavros/... — use relative topic so node namespace applies
+    raw_ref_pos_pub = this->create_publisher<mavros_msgs::msg::PositionTarget>("mavros/setpoint_raw/local", 10);
   }
 
   // Subscribers
   image_sub = this->create_subscription<sm::Image>(
-    _depth_topic, 10,
+    _depth_topic, rclcpp::SensorDataQoS().keep_last(1),
     std::bind(&PlannerNode::img_callback, this, std::placeholders::_1));
 
   if (_visualise) {
     visual_sub = this->create_subscription<sm::Image>(
-      _depth_topic, 10,
+      _depth_topic, rclcpp::SensorDataQoS().keep_last(1),
       std::bind(&PlannerNode::visualise, this, std::placeholders::_1));
   }
 
@@ -73,11 +66,6 @@ PlannerNode::PlannerNode()
   // Mission ACK publisher
   mission_ack_pub_ = this->create_publisher<ground_system_msgs::msg::SwarmMissionAck>(
     "/swarm_mission_ack", 10);
-
-  // FBV (Fly-by-Voice) goal subscriber - receives VLM-extracted goals
-  fbv_goal_sub = this->create_subscription<ground_system_msgs::msg::FBVGoal>(
-    "/fbv_goal", 10,
-    std::bind(&PlannerNode::fbv_goal_callback, this, std::placeholders::_1));
 
   // Takeoff command subscriber - triggers takeoff only (no goal)
   takeoff_sub = this->create_subscription<ground_system_msgs::msg::Takeoff>(
@@ -99,25 +87,14 @@ PlannerNode::PlannerNode()
     "odometry", 5,
     std::bind(&PlannerNode::odometry_callback, this, std::placeholders::_1));
 
-  // For MAVROS mode: also subscribe to raw odom to throttle it for zenoh
+  // For MAVROS mode: subscribe to pose/twist/state from MAVROS
   if (_runtime_mode == RuntimeModes::MAVROS) {
     // MAVROS publishes with BEST_EFFORT QoS - must match for subscription to work
     // Use absolute paths since MAVROS is at root namespace, not Drone1 namespace
     rclcpp::QoS mavros_qos(5);
     mavros_qos.best_effort();
-    
-    mavros_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "/mavros/local_position/odom", mavros_qos,
-      [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-        // Throttle from 100Hz to 10Hz
-        rclcpp::Time now = this->now();
-        if ((now - last_odom_throttle_time_).seconds() >= kOdomThrottleInterval_) {
-          odom_throttled_pub_->publish(*msg);
-          last_odom_throttle_time_ = now;
-        }
-      });
 
-    // Pose/twist/accel also use BEST_EFFORT QoS from MAVROS
+    // Pose/twist also use BEST_EFFORT QoS from MAVROS
   mav_pose_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
       "/mavros/local_position/pose", mavros_qos,
     std::bind(&PlannerNode::mav_pose_callback, this, std::placeholders::_1));
@@ -165,13 +142,18 @@ PlannerNode::PlannerNode()
   opus_enabled_ = (opus_env == nullptr) || (std::string(opus_env) != "false");
 
   if (opus_enabled_) {
+    // Reentrant callback group so OPUS action/service responses can fire
+    // concurrently with the high-frequency depth image callback.
+    opus_callback_group_ = this->create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
+
     // Action client for lock acquisition (queuing + cancel support)
     opus_lock_client_ = rclcpp_action::create_client<OpusPlanLockAction>(
-      this, "/opus/plan_lock");
+      this, "/opus/plan_lock", opus_callback_group_);
 
     // Service client for trajectory collision check
     opus_traj_check_client_ = this->create_client<ground_system_msgs::srv::OpusTrajectoryCheck>(
-      "/opus/trajectory_check");
+      "/opus/trajectory_check", rmw_qos_profile_services_default, opus_callback_group_);
 
     // Topic publisher for abort (release lock after grant, before service call)
     rclcpp::QoS opus_qos(10);
@@ -183,6 +165,12 @@ PlannerNode::PlannerNode()
   } else {
     RCLCPP_INFO(this->get_logger(), "OPUS coordination disabled (solo mode)");
   }
+
+  // Initial position publisher for GCS (TRANSIENT_LOCAL so late-joining GUI receives it)
+  rclcpp::QoS latched_qos(1);
+  latched_qos.reliable().transient_local();
+  initial_position_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
+    "initial_position", latched_qos);
 
   RCLCPP_INFO(this->get_logger(), "MIDI Planner initialized");
 }
@@ -293,10 +281,12 @@ void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMi
   _remaining_loops = msg->loop_count > 0 ? msg->loop_count - 1 : 0;
   _waypoint_mission_active = true;
 
-  // Derive takeoff altitude from first waypoint (can be overridden by prior takeoff command)
-  if (_goal_up_coordinate <= 0.0) {
-    _goal_up_coordinate = msg->waypoints[0].up;
-  }
+  // Set takeoff altitude from first waypoint.
+  // For MAVROS: a prior takeoff command may have already set this; the mission overrides it
+  //   since the mission defines the actual flight altitude.
+  // For OmniDrones: drones are already airborne, so this must match the mission altitude
+  //   to allow the TAKING_OFF → ALIGNING_HEADING transition.
+  _goal_up_coordinate = msg->waypoints[0].up;
 
   // Convert FLU waypoints to world frame ONCE using initial yaw.
   convert_waypoints_to_world(initial_yaw);
@@ -357,98 +347,6 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     had_reference_trajectory = false;
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
     RCLCPP_WARN(this->get_logger(), "[MAVROS] Initiating flight sequence...");
-  }
-}
-
-void PlannerNode::fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg) {
-  RCLCPP_INFO(this->get_logger(), "Received FBV goal (body FLU): '%s' -> Forward=%.2f, Left=%.2f, Up=%.2f [confidence: %.2f]",
-              msg->target_label.c_str(), msg->goal_x, msg->goal_y, msg->goal_z, msg->confidence);
-  
-  if (mission_received_) {
-    RCLCPP_WARN(this->get_logger(), "Mission already in progress, ignoring FBV goal");
-    return;
-  }
-  
-  // FBV goal is in body frame (FLU: Forward-Left-Up)
-  // We need to rotate by current yaw to convert to world frame
-  
-  // Get current yaw from quaternion
-  double qw = _state.pose.orientation.w;
-  double qx = _state.pose.orientation.x;
-  double qy = _state.pose.orientation.y;
-  double qz = _state.pose.orientation.z;
-  double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
-  
-  // Store current position for goal computation (use same state for both goal and heading)
-  double current_x = _state.pose.position.x;
-  double current_y = _state.pose.position.y;
-  
-  RCLCPP_INFO(this->get_logger(), "Current pos: (%.2f, %.2f, %.2f), yaw: %.1f deg (%.2f rad)",
-              current_x, current_y, _state.pose.position.z, yaw * 180.0 / M_PI, yaw);
-  
-  // Body FLU: X=Forward, Y=Left, Z=Up
-  double body_forward = msg->goal_x;
-  double body_left = msg->goal_y;
-  double world_offset_x, world_offset_y;  // Offset in world frame
-  
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // OmniDrones: NWU world frame (X=North, Y=West, Z=Up)
-    // Rotate body FLU by yaw to get world NWU
-    // At yaw=0: body Forward=North, body Left=West
-    double world_north = body_forward * cos(yaw) - body_left * sin(yaw);
-    double world_west = body_forward * sin(yaw) + body_left * cos(yaw);
-    world_offset_x = world_north;
-    world_offset_y = world_west;
-    _goal_in_world_frame.x = current_x + world_north;
-    _goal_in_world_frame.y = current_y + world_west;
-    _goal_in_world_frame.z = msg->goal_z;
-  } else {
-    // MAVROS: ENU world frame (X=East, Y=North, Z=Up)
-    // Rotate body FLU by yaw to get world ENU
-    // In ENU: yaw=0 means facing East, yaw increases CCW (toward North)
-    // Body FLU at yaw=0: Forward=East, Left=North
-    // Body FLU at yaw=90°: Forward=North, Left=West=-East
-    double world_east = body_forward * cos(yaw) - body_left * sin(yaw);
-    double world_north = body_forward * sin(yaw) + body_left * cos(yaw);
-    world_offset_x = world_east;
-    world_offset_y = world_north;
-    _goal_in_world_frame.x = current_x + world_east;
-    _goal_in_world_frame.y = current_y + world_north;
-    _goal_in_world_frame.z = msg->goal_z;
-  }
-  
-  // Compute goal heading NOW using the offset (not later with potentially different state)
-  // This ensures heading matches the goal direction we just computed
-  _goal_heading = atan2(world_offset_y, world_offset_x);
-  
-  // If _goal_up_coordinate wasn't set by a prior takeoff command, use the FBV goal altitude
-  // This ensures takeoff completion check works even without explicit takeoff command
-  if (_goal_up_coordinate <= 0.0) {
-    _goal_up_coordinate = msg->goal_z;
-  }
-  
-  RCLCPP_INFO(this->get_logger(), "World offset: (%.2f, %.2f), heading: %.1f deg",
-              world_offset_x, world_offset_y, _goal_heading * 180.0 / M_PI);
-  RCLCPP_INFO(this->get_logger(), "Setting FBV goal to world (%.2f, %.2f, %.2f) - target: %s",
-              _goal_in_world_frame.x, _goal_in_world_frame.y, _goal_in_world_frame.z,
-              msg->target_label.c_str());
-  _goal_set = true;
-  mission_received_ = true;
-  
-  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
-    // Simulation mode: directly start trajectory control
-    RCLCPP_WARN(this->get_logger(), "[SIM/FBV] Starting navigation to '%s'!", msg->target_label.c_str());
-    set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-    _home_in_world_frame = _state.pose.position;
-    steering_value = 0.0f;
-    _steered = false;
-    trajectory_queue_.clear();
-    reference_trajectory_ = ruckig::Trajectory<3>();
-    had_reference_trajectory = false;
-  } else if (_runtime_mode == RuntimeModes::MAVROS) {
-    // Real FC mode: will initiate GUIDED->ARM->TAKEOFF sequence in update_planner_state()
-    RCLCPP_WARN(this->get_logger(), "[MAVROS/FBV] Goal received, initiating flight sequence to '%s'...",
-                msg->target_label.c_str());
   }
 }
 
@@ -636,6 +534,20 @@ void PlannerNode::mav_pose_callback(const geometry_msgs::msg::PoseStamped::Share
     auto min_stamp = std::min({_latest_pose_stamp, _latest_twist_stamp});
     _state.t = min_stamp.seconds();
   }
+
+  // Publish initial position once for GCS 3D map (MAVROS mode)
+  if (!initial_position_published_) {
+    geometry_msgs::msg::PointStamped pt;
+    pt.header.stamp = msg->header.stamp;
+    pt.header.frame_id = _world_frame;
+    pt.point.x = msg->pose.position.x;
+    pt.point.y = msg->pose.position.y;
+    pt.point.z = msg->pose.position.z;
+    initial_position_pub_->publish(pt);
+    initial_position_published_ = true;
+    RCLCPP_INFO(this->get_logger(), "Published initial position (%.2f, %.2f, %.2f)",
+      pt.point.x, pt.point.y, pt.point.z);
+  }
 }
 
 void PlannerNode::mav_twist_callback(const geometry_msgs::msg::TwistStamped::SharedPtr msg) {
@@ -662,6 +574,18 @@ void PlannerNode::odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg
   _state.t = rclcpp::Time(msg->header.stamp).seconds();
   _state.pose = msg->pose.pose;
   _state.velocity = msg->twist.twist;
+
+  // Publish initial position once for GCS 3D map
+  if (!initial_position_published_) {
+    geometry_msgs::msg::PointStamped pt;
+    pt.header.stamp = msg->header.stamp;
+    pt.header.frame_id = _world_frame;
+    pt.point = msg->pose.pose.position;
+    initial_position_pub_->publish(pt);
+    initial_position_published_ = true;
+    RCLCPP_INFO(this->get_logger(), "Published initial position (%.2f, %.2f, %.2f)",
+      pt.point.x, pt.point.y, pt.point.z);
+  }
   // Note: acceleration can be computed from velocity if needed, but not used in MIDI method
 
   // Debug: Log odometry with yaw periodically
@@ -752,7 +676,7 @@ void PlannerNode::update_planner_state() {
   if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
       (_goal_set || takeoff_requested_)) {
     
-    // Note: _goal_heading is now computed in the goal callbacks (fbv_goal_callback, fly_to_callback)
+    // Note: _goal_heading is now computed in the goal callbacks (fly_to_callback, mission_upload_callback)
     // at the same time as goal position, using the same state snapshot.
     // For takeoff-only (no goal), use default heading of 0.
     if (!_goal_set) {
@@ -868,7 +792,7 @@ void PlannerNode::update_planner_state() {
 
   // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached
   // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
-  // This allows FBV/fly_to goals with different altitudes to work properly
+  // This allows fly_to goals with different altitudes to work properly
   double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
   if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
     RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), aligning heading to goal",
@@ -1047,8 +971,6 @@ void PlannerNode::track_trajectory() {
     // OmniDrones supports both position and velocity control
     // Use PositionTarget for full state control (position + velocity + acceleration)
     public_ref_pos(reference_point);
-    // Also publish velocity command for velocity-only control mode
-    // publish_velocity_command(reference_point);
   }
 }
 
@@ -1140,24 +1062,6 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
   //   msg.velocity.x, msg.velocity.y, msg.velocity.z);
   
   raw_ref_pos_pub->publish(msg);
-}
-
-void PlannerNode::publish_velocity_command(const TrajectoryPoint& reference_point) {
-  geometry_msgs::msg::TwistStamped vel_cmd;
-  vel_cmd.header.stamp = this->now();
-  vel_cmd.header.frame_id = "map";
-
-  // Velocity in world frame (ENU)
-  vel_cmd.twist.linear.x = reference_point.velocity(0);
-  vel_cmd.twist.linear.y = reference_point.velocity(1);
-  vel_cmd.twist.linear.z = reference_point.velocity(2);
-
-  // No angular velocity for simple navigation
-  vel_cmd.twist.angular.x = 0.0;
-  vel_cmd.twist.angular.y = 0.0;
-  vel_cmd.twist.angular.z = 0.0;
-
-  vel_cmd_pub->publish(vel_cmd);
 }
 
 void PlannerNode::get_reference_point_at_time(

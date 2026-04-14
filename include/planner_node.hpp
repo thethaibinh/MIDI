@@ -59,7 +59,6 @@
 #include <ground_system_msgs/msg/start_swarm_mission.hpp>
 #include <ground_system_msgs/msg/swarm_mission_upload.hpp>
 #include <ground_system_msgs/msg/swarm_mission_ack.hpp>
-#include <ground_system_msgs/msg/fbv_goal.hpp>
 #include <ground_system_msgs/msg/benchmark_status.hpp>
 #include <ground_system_msgs/msg/takeoff.hpp>
 #include <ground_system_msgs/msg/fly_to.hpp>
@@ -133,21 +132,19 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr visual_pub;
   rclcpp::Publisher<sm::PointCloud2>::SharedPtr point_cloud_pub;
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr raw_ref_pos_pub;
-  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr vel_cmd_pub;
   rclcpp::Publisher<ground_system_msgs::msg::BenchmarkStatus>::SharedPtr benchmark_status_pub;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_throttled_pub_;  // Throttled odom for zenoh
+  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr initial_position_pub_;
+  bool initial_position_published_ = false;
   
   rclcpp::Subscription<sm::Image>::SharedPtr image_sub;
   rclcpp::Subscription<sm::Image>::SharedPtr visual_sub;
   rclcpp::Subscription<ground_system_msgs::msg::StartSwarmMission>::SharedPtr mission_sub;
   rclcpp::Subscription<ground_system_msgs::msg::SwarmMissionUpload>::SharedPtr mission_upload_sub;
   rclcpp::Publisher<ground_system_msgs::msg::SwarmMissionAck>::SharedPtr mission_ack_pub_;
-  rclcpp::Subscription<ground_system_msgs::msg::FBVGoal>::SharedPtr fbv_goal_sub;
   rclcpp::Subscription<ground_system_msgs::msg::Takeoff>::SharedPtr takeoff_sub;
   rclcpp::Subscription<ground_system_msgs::msg::FlyTo>::SharedPtr fly_to_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr mavros_odom_sub_;  // For throttling
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mav_pose_sub;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr mav_twist_sub;
@@ -199,7 +196,6 @@ class PlannerNode : public rclcpp::Node {
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
   void mission_upload_callback(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr msg);
-  void fbv_goal_callback(const ground_system_msgs::msg::FBVGoal::SharedPtr msg);
   void takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg);
   void fly_to_callback(const ground_system_msgs::msg::FlyTo::SharedPtr msg);
   void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
@@ -218,7 +214,6 @@ class PlannerNode : public rclcpp::Node {
   void update_reference_trajectory();
   void track_trajectory();
   void update_planner_state();
-  void publish_velocity_command(const TrajectoryPoint& reference_point);
   void public_ref_pos(const TrajectoryPoint& reference_point);
   void asign_reference_trajectory(rclcpp::Time wall_time_now);
   void get_reference_point_at_time(
@@ -266,7 +261,7 @@ class PlannerNode : public rclcpp::Node {
   bool _visualise, _3d_planning, _debug_num_trajectories, _is_spiral_sampling;
   std::vector<double> _depth_uncertainty_coeffs;
   double _depth_upper_bound, _depth_lower_bound, _checking_time_ratio, _depth_sampling_margin;
-  double _go_to_goal_threshold, _goal_north_coordinate, _goal_west_coordinate, _goal_up_coordinate;
+  double _go_to_goal_threshold, _goal_up_coordinate;
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
   double _goal_heading;  // Heading to goal (computed once when goal is set)
@@ -323,12 +318,9 @@ class PlannerNode : public rclcpp::Node {
   int32_t _current_trial_id = 0;
   rclcpp::Time _trial_start_time{0, 0, RCL_ROS_TIME};
   bool _trial_started = false;
-  
-  // Odom throttle for zenoh (100Hz -> 10Hz)
-  rclcpp::Time last_odom_throttle_time_{0, 0, RCL_ROS_TIME};
-  static constexpr double kOdomThrottleInterval_ = 0.1;  // 10 Hz
 
   // OPUS coordination (action client + service client + abort topic)
+  rclcpp::CallbackGroup::SharedPtr opus_callback_group_;  // Reentrant group for OPUS clients
   rclcpp_action::Client<OpusPlanLockAction>::SharedPtr opus_lock_client_;
   rclcpp::Client<ground_system_msgs::srv::OpusTrajectoryCheck>::SharedPtr opus_traj_check_client_;
   rclcpp::Publisher<ground_system_msgs::msg::OpusPlanAbort>::SharedPtr opus_plan_abort_pub_;

@@ -7,10 +7,6 @@ world_frame_name: "world"
 vehicle_frame_name: "vehicle"
 topics:
   depth: "/kingfisher/dodgeros_pilot/unity/depth"
-goal_coordinate:
-  north: 58
-  west: -5.0
-  up: 6.0
 depth_camera:
   depth_scale: 1.0
   depth_uncertainty:
@@ -33,8 +29,13 @@ checked_trajectories_threshold: 200
 traveling_cost: "distance" # "direction" or "distance"
 replan_factor: 3.0
 debug_num_trajectories: yes
-collision_probability_threshold: 5
+collision_probability_threshold: 5.0
 openmp_chunk_size: 16
+
+# Data freshness thresholds
+depth_age_threshold: 0.09
+state_age_threshold: 0.06
+transform_age_threshold: 0.05
 
 # Collision checking parameters
 true_vehicle_radius: 0.13

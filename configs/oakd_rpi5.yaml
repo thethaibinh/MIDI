@@ -10,12 +10,6 @@ vehicle_frame_name: "base_link"
 topics:
   depth: "/oak/stereo/image_raw"
 
-# Goal coordinates (relative to takeoff position in ENU)
-goal_coordinate:
-  north: 5.0   # North (meters in ENU Y direction)
-  west: 0.0     # West (negative means East, meters in ENU X direction)
-  up: 1.0       # Up (meters in ENU Z direction)
-
 # Depth camera parameters - OAK-D Pro W with 4x decimation
 # Native: 1280x720 (720P default), after 4x decimation: 320x180
 # Intrinsics from /oak/stereo/camera_info topic
@@ -50,7 +44,7 @@ checked_trajectories_threshold: 100
 traveling_cost: "distance"          # "direction" or "distance"
 replan_factor: 2.0
 debug_num_trajectories: no
-collision_probability_threshold: 5
+collision_probability_threshold: 5.0
 openmp_chunk_size: 16
 
 # Collision checking parameters (adjust based on your drone size)
