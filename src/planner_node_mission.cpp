@@ -45,6 +45,7 @@ void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMi
   }
   double initial_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
                                    1.0 - 2.0 * (qy * qy + qz * qz));
+  _initial_heading = initial_yaw;  // Store for reinitialise
 
   _waypoint_list.assign(msg->waypoints.begin(), msg->waypoints.end());
   _current_waypoint_index = 0;
@@ -156,8 +157,7 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
   }
 }
 
-void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
-  (void)msg;
+void PlannerNode::reset_planner() {
   RCLCPP_WARN(this->get_logger(), "Planner: Reset quadrotor!");
   set_auto_pilot_state_forced(PlanningStates::OFF);
   steering_value = 0.0f;
@@ -170,6 +170,8 @@ void PlannerNode::reset_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   takeoff_pending_ = false;
   land_pending_ = false;
   takeoff_requested_ = false;
+  _reinitialise_requested = false;
+  brake_mode_switch_sent_ = false;
   trajectory_queue_.clear();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
@@ -379,5 +381,105 @@ void PlannerNode::log_mission_to_yaml(const ground_system_msgs::msg::SwarmMissio
     RCLCPP_INFO(this->get_logger(), "Mission logged to %s", filename.c_str());
   } else {
     RCLCPP_WARN(this->get_logger(), "Failed to write mission log to %s", filename.c_str());
+  }
+}
+
+void PlannerNode::reinitialise_callback(const std_msgs::msg::Empty::SharedPtr msg) {
+  (void)msg;
+
+  if (_planner_state != PlanningStates::FINISHED) {
+    RCLCPP_WARN(this->get_logger(),
+        "Re-initialise rejected: only allowed in FINISHED state (current: %d)",
+        static_cast<int>(_planner_state.load()));
+    return;
+  }
+
+  RCLCPP_INFO(this->get_logger(),
+      "Re-initialise: returning to home (%.2f, %.2f, %.2f) heading=%.1f deg",
+      _home_in_world_frame.x, _home_in_world_frame.y, _home_in_world_frame.z,
+      _initial_heading * 180.0 / M_PI);
+
+  // Set goal to initial position and heading — track_trajectory will fly there in FINISHED state
+  _goal_in_world_frame = _home_in_world_frame;
+  _goal_heading = _initial_heading;
+  _reinitialise_requested = true;
+}
+
+void PlannerNode::brake_callback(const std_msgs::msg::Empty::SharedPtr msg) {
+  (void)msg;
+  RCLCPP_WARN(this->get_logger(), "BRAKE: Emergency hold at current position!");
+
+  // Abort any OPUS planning
+  if (opus_enabled_) {
+    opus_abort_planning("Brake");
+  }
+
+  // Clear trajectory state
+  trajectory_queue_.clear();
+  reference_trajectory_ = ruckig::Trajectory<3>();
+  had_reference_trajectory = false;
+
+  // Switch to BRAKE — dead-end state, nothing escapes
+  set_auto_pilot_state_forced(PlanningStates::BRAKE);
+}
+
+void PlannerNode::land_swarm_callback(const std_msgs::msg::Empty::SharedPtr msg) {
+  (void)msg;
+
+  if (_planner_state != PlanningStates::FINISHED &&
+      _planner_state != PlanningStates::BRAKE) {
+    RCLCPP_WARN(this->get_logger(),
+        "Land rejected: only allowed in FINISHED or BRAKE state (current: %d)",
+        static_cast<int>(_planner_state.load()));
+    return;
+  }
+
+  RCLCPP_WARN(this->get_logger(),
+      "LAND: descending to initial altitude %.2f m at current XY",
+      _home_in_world_frame.z);
+
+  // Abort any OPUS planning
+  if (opus_enabled_) {
+    opus_abort_planning("Land");
+  }
+
+  // Clear trajectory state
+  trajectory_queue_.clear();
+  reference_trajectory_ = ruckig::Trajectory<3>();
+  had_reference_trajectory = false;
+
+  if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+    // OmniDrones: switch to LAND immediately, tracker will descend to home altitude
+    set_auto_pilot_state_forced(PlanningStates::LAND);
+  } else if (_runtime_mode == RuntimeModes::MAVROS) {
+    // MAVROS: send LAND mode to ArduPilot
+    if (!land_pending_ && !mode_switch_pending_) {
+      if (mode_srv->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
+        request->custom_mode = "LAND";
+        mode_switch_pending_ = true;
+        land_pending_ = true;
+
+        mode_srv->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
+            mode_switch_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->mode_sent) {
+                RCLCPP_WARN(this->get_logger(), "LAND mode request sent to FC");
+                set_auto_pilot_state_forced(PlanningStates::LAND);
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Failed to send LAND mode request");
+                land_pending_ = false;
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "LAND mode switch failed: %s", e.what());
+              land_pending_ = false;
+            }
+          });
+      } else {
+        RCLCPP_WARN(this->get_logger(), "SetMode service not ready, cannot send LAND");
+      }
+    }
   }
 }

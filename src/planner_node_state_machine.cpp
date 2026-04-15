@@ -99,6 +99,55 @@ void PlannerNode::update_planner_state() {
     return;  // Don't proceed with other state logic while waiting for FC
   }
 
+  // BRAKE is a dead-end state — no transitions out, only holds position
+  if (_planner_state == PlanningStates::BRAKE) {
+    // MAVROS: send BRAKE mode switch once
+    if (_runtime_mode == RuntimeModes::MAVROS && !brake_mode_switch_sent_ && !mode_switch_pending_) {
+      if (mode_srv->service_is_ready()) {
+        auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
+        request->custom_mode = "BRAKE";
+        mode_switch_pending_ = true;
+        brake_mode_switch_sent_ = true;
+
+        mode_srv->async_send_request(request,
+          [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
+            mode_switch_pending_ = false;
+            try {
+              auto response = future.get();
+              if (response->mode_sent) {
+                RCLCPP_WARN(this->get_logger(), "BRAKE mode request sent to FC");
+              } else {
+                RCLCPP_ERROR(this->get_logger(), "Failed to send BRAKE mode request");
+                brake_mode_switch_sent_ = false;  // Retry next cycle
+              }
+            } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "BRAKE mode switch failed: %s", e.what());
+              brake_mode_switch_sent_ = false;
+            }
+          });
+      }
+    }
+    return;  // Nothing escapes BRAKE
+  }
+
+  // LAND: for OmniDrones, check if drone reached initial altitude → reset
+  // For MAVROS, disarm detection above handles the reset after FC completes landing
+  if (_planner_state == PlanningStates::LAND) {
+    if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+      double altitude_error = std::abs(_state.pose.position.z - _home_in_world_frame.z);
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "Landing: alt=%.2f m, target=%.2f m, error=%.2f m",
+          _state.pose.position.z, _home_in_world_frame.z, altitude_error);
+      if (altitude_error < 0.1) {
+        RCLCPP_INFO(this->get_logger(), "Landing complete, resetting planner");
+        reset_planner();
+      }
+    }
+    // MAVROS: the disarm detection block above will call reset_planner()
+    // when flight_controller_status.armed becomes false after FC lands
+    return;
+  }
+
   // Handle disarm detection (for real FC)
   // Only reset if we were actually flying (TRAJECTORY_CONTROL or later), not during startup
   if (_runtime_mode == RuntimeModes::MAVROS && 
@@ -107,7 +156,7 @@ void PlannerNode::update_planner_state() {
       !flight_controller_status.armed) {
     RCLCPP_WARN(this->get_logger(), "Vehicle disarmed, resetting planner");
     opus_abort_planning("Vehicle disarmed");
-    reset_callback(nullptr);
+    reset_planner();
     return;
   }
 
@@ -202,6 +251,42 @@ void PlannerNode::update_planner_state() {
       }
     }
   }
+  // GO_TO_GOAL → FINISHED when the last trajectory has been fully tracked
+  else if (_planner_state == PlanningStates::GO_TO_GOAL && had_reference_trajectory) {
+    rclcpp::Duration trajectory_point_time = this->now() - _reference_trajectory_start_time;
+    double point_time = trajectory_point_time.seconds();
+    if (point_time > reference_trajectory_.get_duration()) {
+      RCLCPP_INFO(this->get_logger(),
+          "Trajectory complete (%.2f s > %.2f s duration), mission finished",
+          point_time, reference_trajectory_.get_duration());
+      set_auto_pilot_state_forced(PlanningStates::FINISHED);
+    }
+  }
+  // FINISHED + reinitialise requested: check if drone reached home → auto-reset
+  else if (_planner_state == PlanningStates::FINISHED && _reinitialise_requested) {
+    double dist_to_home = (geometryToEigen(_state.pose.position) -
+                           geometryToEigen(_home_in_world_frame)).norm();
+
+    double qw = _state.pose.orientation.w;
+    double qx = _state.pose.orientation.x;
+    double qy = _state.pose.orientation.y;
+    double qz = _state.pose.orientation.z;
+    double current_yaw = std::atan2(2.0 * (qw * qz + qx * qy),
+                                     1.0 - 2.0 * (qy * qy + qz * qz));
+    double yaw_error = _initial_heading - current_yaw;
+    while (yaw_error > M_PI) yaw_error -= 2.0 * M_PI;
+    while (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "Re-initialise: dist=%.2f m, heading_err=%.1f deg",
+        dist_to_home, yaw_error * 180.0 / M_PI);
+
+    if (dist_to_home < _go_to_goal_threshold / 3 && std::abs(yaw_error) < kHeadingAlignThreshold_) {
+      RCLCPP_INFO(this->get_logger(),
+          "Re-initialise complete: at home position, resetting planner");
+      reset_planner();
+    }
+  }
   // Land when at goal (MAVROS only)
   // else if (_runtime_mode == RuntimeModes::MAVROS &&
   //          _planner_state == PlanningStates::GO_TO_GOAL &&
@@ -257,6 +342,7 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
     case PlanningStates::HOLDING_WAYPOINT:  state_name = "HOLDING_WAYPOINT"; break;
     case PlanningStates::LAND:              state_name = "LAND"; break;
     case PlanningStates::FINISHED:          state_name = "FINISHED"; break;
+    case PlanningStates::BRAKE:             state_name = "BRAKE"; break;
   }
   RCLCPP_WARN(this->get_logger(), "Switched to %s state", state_name.c_str());
 }

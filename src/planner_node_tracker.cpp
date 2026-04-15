@@ -87,15 +87,29 @@ void PlannerNode::control_loop() {
 
 void PlannerNode::track_trajectory() {
   // Don't track trajectory in non-flight states
-  if (_planner_state == PlanningStates::LAND ||
-      _planner_state == PlanningStates::OFF ||
+  if (_planner_state == PlanningStates::OFF ||
       !_goal_set)
     return;
 
-  // ALIGNING_HEADING, HOLDING_WAYPOINT, WAITING_FOR_OPUS: hold position, rotate toward goal
+  // LAND: for MAVROS the FC handles descent; for OmniDrones send setpoint at current XY + home Z
+  if (_planner_state == PlanningStates::LAND) {
+    if (_runtime_mode == RuntimeModes::OMNIDRONES) {
+      TrajectoryPoint land_point;
+      land_point.position = Eigen::Vector3d(
+          _state.pose.position.x, _state.pose.position.y, _home_in_world_frame.z);
+      land_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+      land_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+      land_point.heading = _goal_heading;
+      public_ref_pos(land_point);
+    }
+    return;
+  }
+
+  // ALIGNING_HEADING, HOLDING_WAYPOINT, WAITING_FOR_OPUS, BRAKE: hold current position, rotate toward goal
   if (_planner_state == PlanningStates::ALIGNING_HEADING ||
       _planner_state == PlanningStates::HOLDING_WAYPOINT ||
-      _planner_state == PlanningStates::WAITING_FOR_OPUS) {
+      _planner_state == PlanningStates::WAITING_FOR_OPUS ||
+      _planner_state == PlanningStates::BRAKE) {
     if (_runtime_mode == RuntimeModes::MAVROS) {
       TrajectoryPoint hold_point;
       hold_point.position = geometryToEigen(_state.pose.position);
@@ -111,6 +125,17 @@ void PlannerNode::track_trajectory() {
       hold_point.heading = _goal_heading;
       public_ref_pos(hold_point);
     }
+    return;
+  }
+
+  // FINISHED: track toward goal position (last waypoint, or home after reinitialise)
+  if (_planner_state == PlanningStates::FINISHED) {
+    TrajectoryPoint hold_point;
+    hold_point.position = geometryToEigen(_goal_in_world_frame);
+    hold_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+    hold_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+    hold_point.heading = _goal_heading;
+    public_ref_pos(hold_point);
     return;
   }
   

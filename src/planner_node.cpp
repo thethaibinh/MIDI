@@ -86,9 +86,27 @@ PlannerNode::PlannerNode()
     std::bind(&PlannerNode::takeoff_callback, this, std::placeholders::_1),
     control_sub_opts);
 
-  reset_sub = this->create_subscription<std_msgs::msg::Empty>(
-    "/reset_planner", 10,
-    std::bind(&PlannerNode::reset_callback, this, std::placeholders::_1),
+  // reset_sub = this->create_subscription<std_msgs::msg::Empty>(
+  //   "/reset_planner", 10,
+  //   [this](const std_msgs::msg::Empty::SharedPtr) { reset_planner(); },
+  //   control_sub_opts);
+
+  // Re-initialise subscriber — return drones to initial position (FINISHED state only)
+  reinitialise_sub = this->create_subscription<std_msgs::msg::Empty>(
+    "/reinitialise_swarm", 10,
+    std::bind(&PlannerNode::reinitialise_callback, this, std::placeholders::_1),
+    control_sub_opts);
+
+  // Brake subscriber — emergency hold at current position (dead-end state)
+  brake_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+    "/brake", 10,
+    std::bind(&PlannerNode::brake_callback, this, std::placeholders::_1),
+    control_sub_opts);
+
+  // Land subscriber — descend to initial altitude and reset
+  land_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+    "/land", 10,
+    std::bind(&PlannerNode::land_swarm_callback, this, std::placeholders::_1),
     control_sub_opts);
 
   // Subscribe to odometry - use relative topic so namespace remapping works

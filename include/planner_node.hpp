@@ -141,6 +141,9 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Publisher<ground_system_msgs::msg::SwarmMissionAck>::SharedPtr mission_ack_pub_;
   rclcpp::Subscription<ground_system_msgs::msg::Takeoff>::SharedPtr takeoff_sub;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reinitialise_sub;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr brake_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr land_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr mav_state_sub;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mav_pose_sub;
@@ -161,6 +164,8 @@ class PlannerNode : public rclcpp::Node {
   std::atomic<bool> takeoff_pending_{false};
   std::atomic<bool> land_pending_{false};
   std::atomic<bool> takeoff_requested_{false};  // Triggers GUIDED->ARM->TAKEOFF without goal
+  bool _reinitialise_requested{false};  // True after reinitialise_callback, cleared on auto-reset
+  std::atomic<bool> brake_mode_switch_sent_{false};  // MAVROS: BRAKE mode switch sent once
   
   rclcpp::TimerBase::SharedPtr control_loop_timer_;
   
@@ -194,7 +199,9 @@ class PlannerNode : public rclcpp::Node {
   void mission_callback(const ground_system_msgs::msg::StartSwarmMission::SharedPtr msg);
   void mission_upload_callback(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr msg);
   void takeoff_callback(const ground_system_msgs::msg::Takeoff::SharedPtr msg);
-  void reset_callback(const std_msgs::msg::Empty::SharedPtr msg);
+  void reset_planner();
+  void brake_callback(const std_msgs::msg::Empty::SharedPtr msg);
+  void land_swarm_callback(const std_msgs::msg::Empty::SharedPtr msg);
   void img_callback(const sm::Image::SharedPtr depth_msg);
   void visualise(const sm::Image::SharedPtr depth_msg);
   void odometry_callback(const nav_msgs::msg::Odometry::SharedPtr odom_msg);
@@ -252,6 +259,7 @@ class PlannerNode : public rclcpp::Node {
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
   double _goal_heading;  // Heading to goal (computed once when goal is set)
+  double _initial_heading = 0.0;  // Heading at mission upload (for reinitialise)
   double _trajectory_heading = 0.0;  // Heading toward trajectory terminal (updated per trajectory)
 
   // Waypoint mission tracking
@@ -271,10 +279,12 @@ class PlannerNode : public rclcpp::Node {
   void convert_waypoints_to_world(double initial_yaw);
   // Compute heading from current position toward _goal_in_world_frame
   double compute_heading_to_goal() const;
+  // Re-initialise callback: return to initial position (only from FINISHED state)
+  void reinitialise_callback(const std_msgs::msg::Empty::SharedPtr msg);
   // Log received mission to YAML file for history/replay
   void log_mission_to_yaml(const ground_system_msgs::msg::SwarmMissionUpload::SharedPtr& msg);
   // Heading alignment threshold (radians, ~10 degrees)
-  static constexpr double kHeadingAlignThreshold_ = 0.17;
+  static constexpr double kHeadingAlignThreshold_ = 0.07;
   // Maximum yaw rate for heading alignment (rad/s)
   static constexpr double kHeadingAlignYawRate_ = 0.5;
 

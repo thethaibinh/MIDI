@@ -11,7 +11,8 @@ enum class PlanningStates {
   GO_TO_GOAL,
   HOLDING_WAYPOINT,
   LAND,
-  FINISHED
+  FINISHED,
+  BRAKE
 };
 enum class RuntimeModes { OMNIDRONES = 1, MAVROS = 2 };
 enum class MavrosControlModes { KINEMATIC = 1, ATTITUDE = 2 };
