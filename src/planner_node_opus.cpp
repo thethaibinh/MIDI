@@ -55,7 +55,9 @@ void PlannerNode::opus_status_callback(
       msg->planning_drone_id);
     opus_granted_ = false;
     opus_check_pending_ = false;
-    opus_submission_needed_ = false;
+    // Do NOT clear opus_submission_needed_: the drone still needs to submit.
+    // Clearing it here caused stuck-in-WAITING_FOR_OPUS when
+    // had_reference_trajectory is false (first waypoint).
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_pre_queue_.reset();
   }
@@ -88,9 +90,11 @@ void PlannerNode::opus_trajectory_ack_callback(
 
     RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
                 msg->plan_sequence);
-    // Immediately flag for next submission so the lock request goes out
-    // on the next img_callback — eliminates the 1/3-duration replan delay.
-    opus_submission_needed_ = true;
+    // Submission complete — let the natural replan trigger in
+    // update_reference_trajectory() re-arm after the drone has consumed
+    // ~1/3 of the trajectory.  Setting true here caused a tight 40ms
+    // accept→request→grant→submit loop that monopolised the OPUS lock.
+    opus_submission_needed_ = false;
     opus_pre_queue_.reset();
 
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
