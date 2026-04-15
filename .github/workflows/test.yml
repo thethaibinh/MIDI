@@ -2,7 +2,7 @@ name: Math Library Tests
 
 on:
   push:
-    branches: [main, master, opus-ros2-actions]
+    branches: [main, master, opus]
   pull_request:
     branches: [main, master]
 
