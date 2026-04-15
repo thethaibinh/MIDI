@@ -48,7 +48,7 @@ transform_age_threshold: 0.1        # Max age of TF transforms (seconds) before 
 2d_z_margin: 0.2                 # Must accommodate drone pitch: sin(pitch)*depth_upper_bound
 traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
-debug_num_trajectories: no
+debug_num_trajectories: yes
 collision_probability_threshold: 5.0
 openmp_chunk_size: 64              # Optimized: 320x200/12threads ≈ 5333 pixels, chunk=64 for good load balance
 

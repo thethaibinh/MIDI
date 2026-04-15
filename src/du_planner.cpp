@@ -136,13 +136,27 @@ bool DuPlanner::find_lowest_cost_trajectory(
     if (segments.empty()) continue;
 
     bool is_collision_free = true;
+    // When the drone's camera-frame Z velocity is negative (moving backward
+    // relative to camera forward), the Ruckig trajectory must first decelerate
+    // then reverse direction. Those initial segments are non-monotonic in depth
+    // but unavoidable — there is no depth data behind the camera to check
+    // against anyway.  Once a monotonically-increasing segment is found, all
+    // subsequent segments must also be monotonic.
+    bool allow_non_monotonic = (initial_state.current_velocity[2] < -1e-3);
     for (uint8_t i = 0; i < segments.size(); i++) {
       if (const auto* second_order_segment = dynamic_cast<const common_math::SecondOrderSegment*>(segments[i])) {
         if (!second_order_segment->is_monotonically_increasing_depth()) {
+          if (allow_non_monotonic) {
+            // Skip collision check for deceleration/reversal segment
+            // (backward motion — no depth data behind camera)
+            continue;
+          }
           is_collision_free = false;
           _num_rejected_monotonic++;
           break;
         }
+        // Past the reversal: all subsequent segments must be monotonic
+        allow_non_monotonic = false;
         is_collision_free &= is_segment2_collision_free(second_order_segment, trajectory_collision_probability, mahalanobis_distance);
       } else if (const auto* third_order_segment = dynamic_cast<const common_math::ThirdOrderSegment*>(segments[i])) {
         // For third order segments in CPU mode, we skip them or handle differently
