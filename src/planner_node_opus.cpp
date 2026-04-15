@@ -88,6 +88,11 @@ void PlannerNode::opus_trajectory_ack_callback(
 
     RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
                 msg->plan_sequence);
+    // Immediately flag for next submission so the lock request goes out
+    // on the next img_callback — eliminates the 1/3-duration replan delay.
+    opus_submission_needed_ = true;
+    opus_pre_queue_.reset();
+
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
@@ -107,6 +112,18 @@ void PlannerNode::opus_trajectory_ack_callback(
       opus_granted_ = false;
       opus_lock_pending_ = false;
       opus_submission_needed_ = false;
+      opus_grant_time_ = std::chrono::steady_clock::time_point{};
+      opus_pre_queue_.reset();
+    } else {
+      // Collision rejection — release lock so other drones can proceed.
+      // We'll re-request on the next planning cycle; by then the situation
+      // may have changed (other drone moved, different depth frame).
+      RCLCPP_WARN(this->get_logger(),
+        "OPUS: Collision — releasing lock, will re-request (seq=%u)",
+        opus_plan_sequence_);
+      opus_granted_ = false;
+      opus_lock_pending_ = false;
+      opus_submission_needed_ = true;
       opus_grant_time_ = std::chrono::steady_clock::time_point{};
       opus_pre_queue_.reset();
     }

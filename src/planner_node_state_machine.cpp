@@ -256,6 +256,16 @@ void PlannerNode::update_planner_state() {
       if (advance_waypoint()) {
         // More waypoints → align heading then plan to next
         set_auto_pilot_state_forced(PlanningStates::ALIGNING_HEADING);
+        // Pre-request OPUS lock during heading alignment so it's ready
+        // when alignment completes — saves one full round-trip delay.
+        if (opus_enabled_) {
+          const std::lock_guard<std::mutex> olock(opus_mutex_);
+          opus_submission_needed_ = true;
+          opus_pre_queue_.reset();
+          if (!opus_lock_pending_ && !opus_granted_ && !opus_check_pending_) {
+            opus_send_lock_request();
+          }
+        }
       } else {
         // Mission complete → go to goal (final position hold)
         set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);
