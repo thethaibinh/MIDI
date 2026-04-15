@@ -184,10 +184,11 @@ void PlannerNode::track_trajectory() {
     reference_point.heading = _goal_heading;
   }
 
-  // In TRAJECTORY_CONTROL, face toward trajectory terminal rather than global goal
-  if (_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) {
-    reference_point.heading = _trajectory_heading;
-  }
+  // Heading: always face toward the current waypoint (_goal_heading).
+  // get_reference_point_at_time already sets reference_point.heading = _goal_heading.
+  // Do NOT override with _trajectory_heading (the local obstacle-avoidance
+  // trajectory direction) — each short trajectory segment can point sideways
+  // or backwards, causing heading to diverge between segments.
 
   // Publish position/velocity setpoint (kinematic control mode)
   if (_runtime_mode == RuntimeModes::MAVROS) {
