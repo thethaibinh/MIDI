@@ -232,7 +232,13 @@ void PlannerNode::update_planner_state() {
     }
   }
   // Transition to GO_TO_GOAL / HOLDING_WAYPOINT when near goal
-  else if (_planner_state == PlanningStates::TRAJECTORY_CONTROL &&
+  // Check both TRAJECTORY_CONTROL and WAITING_FOR_OPUS — the drone may reach
+  // the goal vicinity while still waiting for OPUS (e.g. carried by inertia
+  // or the goal was already close). Without this, a drone near the goal that
+  // can't find feasible trajectories (too close) loops forever in
+  // WAITING_FOR_OPUS → grant → no trajectory → abort → re-request.
+  else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL ||
+            _planner_state == PlanningStates::WAITING_FOR_OPUS) &&
            (distance_to_goal < _go_to_goal_threshold ||
             ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
              _runtime_mode == RuntimeModes::MAVROS))) {
