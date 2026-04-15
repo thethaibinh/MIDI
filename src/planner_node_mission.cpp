@@ -407,6 +407,11 @@ void PlannerNode::reinitialise_callback(const std_msgs::msg::Empty::SharedPtr ms
 
 void PlannerNode::brake_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   (void)msg;
+  if (_planner_state == PlanningStates::LAND || _planner_state == PlanningStates::FINISHED || _planner_state == PlanningStates::OFF || _planner_state == PlanningStates::BRAKE)
+  {
+    RCLCPP_WARN(this->get_logger(), "BRAKE: Emergency hold not allowed in LAND state!");
+    return;
+  }
   RCLCPP_WARN(this->get_logger(), "BRAKE: Emergency hold at current position!");
 
   // Abort any OPUS planning

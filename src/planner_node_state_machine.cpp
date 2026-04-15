@@ -281,7 +281,7 @@ void PlannerNode::update_planner_state() {
         "Re-initialise: dist=%.2f m, heading_err=%.1f deg",
         dist_to_home, yaw_error * 180.0 / M_PI);
 
-    if (dist_to_home < _go_to_goal_threshold / 3 && std::abs(yaw_error) < kHeadingAlignThreshold_) {
+    if (dist_to_home < 0.1 && std::abs(yaw_error) < kHeadingAlignThreshold_) {
       RCLCPP_INFO(this->get_logger(),
           "Re-initialise complete: at home position, resetting planner");
       reset_planner();
