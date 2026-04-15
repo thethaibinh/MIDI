@@ -188,6 +188,10 @@ if(BUILD_TESTING)
   # Test: OPUS planner state machine transitions
   ament_add_gtest(test_opus_state_machine test/test_opus_state_machine.cpp)
   target_include_directories(test_opus_state_machine PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+
+  # Test: Planner state machine transitions (non-OPUS: takeoff, brake, land, reinit, waypoints)
+  ament_add_gtest(test_planner_state_machine test/test_planner_state_machine.cpp)
+  target_include_directories(test_planner_state_machine PRIVATE include ${EIGEN3_INCLUDE_DIRS})
 endif()
 
 ament_package()

@@ -233,13 +233,18 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     bool have_entry = false;
     {
       std::lock_guard<std::mutex> olock(opus_mutex_);
-      if (opus_pre_queue_.has_value()) {
+      // Re-verify grant still held (could have been revoked by status callback)
+      if (!opus_granted_) {
+        opus_ready_to_submit = false;
+      } else if (opus_pre_queue_.has_value()) {
         fast_entry = opus_pre_queue_.value();
         have_entry = true;
       }
     }
 
-    if (have_entry) {
+    if (!opus_ready_to_submit) {
+      // Grant was revoked between initial check and here — fall through to local planning
+    } else if (have_entry) {
       RCLCPP_INFO(this->get_logger(),
         "OPUS: Submitting pre-queued trajectory (GCS collision check)");
       opus_submit_trajectory(fast_entry.trajectory,
@@ -282,6 +287,13 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   opt_traj.assign_world_to_body_transform(world_to_body);
 
   if (opus_enabled_) {
+    // Re-verify grant under lock before submitting freshly planned trajectory
+    if (opus_ready_to_submit) {
+      std::lock_guard<std::mutex> olock(opus_mutex_);
+      if (!opus_granted_) {
+        opus_ready_to_submit = false;
+      }
+    }
     if (opus_ready_to_submit) {
       // Submit directly — GCS performs collision check
       opus_submit_trajectory(opt_traj, body_to_world, position_world_frame);

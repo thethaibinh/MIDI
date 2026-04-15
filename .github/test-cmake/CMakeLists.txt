@@ -37,3 +37,13 @@ add_test(NAME test_frame_transforms COMMAND test_frame_transforms)
 add_executable(test_trajectory_cost ${MIDI_ROOT}/test/test_trajectory_cost.cpp)
 target_link_libraries(test_trajectory_cost GTest::gtest GTest::gtest_main)
 add_test(NAME test_trajectory_cost COMMAND test_trajectory_cost)
+
+# OPUS planner state machine transitions
+add_executable(test_opus_state_machine ${MIDI_ROOT}/test/test_opus_state_machine.cpp)
+target_link_libraries(test_opus_state_machine GTest::gtest GTest::gtest_main)
+add_test(NAME test_opus_state_machine COMMAND test_opus_state_machine)
+
+# Planner state machine transitions (non-OPUS)
+add_executable(test_planner_state_machine ${MIDI_ROOT}/test/test_planner_state_machine.cpp)
+target_link_libraries(test_planner_state_machine GTest::gtest GTest::gtest_main)
+add_test(NAME test_planner_state_machine COMMAND test_planner_state_machine)

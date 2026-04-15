@@ -3,6 +3,7 @@
 using namespace quadrotor_common;
 
 void PlannerNode::ardupilot_status_callback(const mavros_msgs::msg::State::SharedPtr msg) {
+  const std::lock_guard<std::mutex> lock(fc_status_mutex_);
   flight_controller_status = *msg;
 }
 

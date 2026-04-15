@@ -3,6 +3,14 @@
 using namespace quadrotor_common;
 
 void PlannerNode::update_planner_state() {
+  // Snapshot flight controller status under lock (written by ardupilot_status_callback
+  // on state_callback_group_, read here on control_callback_group_)
+  mavros_msgs::msg::State fc_status;
+  if (_runtime_mode == RuntimeModes::MAVROS) {
+    const std::lock_guard<std::mutex> lock(fc_status_mutex_);
+    fc_status = flight_controller_status;
+  }
+
   // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
   // Trigger on either _goal_set (mission) or takeoff_requested_ (takeoff-only)
   if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
@@ -19,10 +27,10 @@ void PlannerNode::update_planner_state() {
                      _goal_heading * 180.0 / M_PI, _goal_heading);
     
     // Step 1: Switch to GUIDED mode if not already
-    if (flight_controller_status.mode != "GUIDED" && !mode_switch_pending_) {
+    if (fc_status.mode != "GUIDED" && !mode_switch_pending_) {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
         "Attempting GUIDED mode switch... current mode: '%s', service ready: %d",
-        flight_controller_status.mode.c_str(), mode_srv->service_is_ready());
+        fc_status.mode.c_str(), mode_srv->service_is_ready());
       if (mode_srv->service_is_ready()) {
         auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
         request->custom_mode = "GUIDED";
@@ -47,7 +55,7 @@ void PlannerNode::update_planner_state() {
     }
     
     // Step 2: Arm if in GUIDED but not armed
-    if (flight_controller_status.mode == "GUIDED" && !flight_controller_status.armed && !arming_pending_) {
+    if (fc_status.mode == "GUIDED" && !fc_status.armed && !arming_pending_) {
       if (arming_srv->service_is_ready()) {
         auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
         request->value = true;
@@ -72,7 +80,7 @@ void PlannerNode::update_planner_state() {
     }
     
     // Step 3: Takeoff if armed
-    if (flight_controller_status.mode == "GUIDED" && flight_controller_status.armed && !takeoff_pending_) {
+    if (fc_status.mode == "GUIDED" && fc_status.armed && !takeoff_pending_) {
       if (takeoff_srv->service_is_ready()) {
         auto request = std::make_shared<mavros_msgs::srv::CommandTOL::Request>();
         // Use goal altitude if set, otherwise use _goal_up_coordinate (from takeoff command)
@@ -153,7 +161,7 @@ void PlannerNode::update_planner_state() {
   if (_runtime_mode == RuntimeModes::MAVROS && 
       _planner_state != PlanningStates::OFF &&
       _planner_state != PlanningStates::TAKING_OFF &&
-      !flight_controller_status.armed) {
+      !fc_status.armed) {
     RCLCPP_WARN(this->get_logger(), "Vehicle disarmed, resetting planner");
     opus_abort_planning("Vehicle disarmed");
     reset_planner();
@@ -208,7 +216,10 @@ void PlannerNode::update_planner_state() {
                   yaw_error * 180.0 / M_PI);
       // Clear trajectory state so planner starts fresh
       had_reference_trajectory = false;
-      trajectory_queue_.clear();
+      {
+        const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+        trajectory_queue_.clear();
+      }
       // OPUS: trigger immediate submission on the first planned trajectory
       if (opus_enabled_) {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
@@ -324,9 +335,11 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
   const rclcpp::Time time_now = this->now();
 
   if (new_state != PlanningStates::TRAJECTORY_CONTROL &&
-      new_state != PlanningStates::WAITING_FOR_OPUS &&
-      !trajectory_queue_.empty()) {
-    trajectory_queue_.clear();
+      new_state != PlanningStates::WAITING_FOR_OPUS) {
+    const std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    if (!trajectory_queue_.empty()) {
+      trajectory_queue_.clear();
+    }
   }
   time_of_switch_to_current_state_ = time_now;
   _planner_state.store(new_state, std::memory_order_release);

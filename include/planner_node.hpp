@@ -173,6 +173,7 @@ class PlannerNode : public rclcpp::Node {
   double steering_value;
   bool _steered;
   std::mutex state_mutex_, trajectory_mutex_;
+  std::mutex fc_status_mutex_;  // Protects flight_controller_status (written on state_callback_group_, read on control_callback_group_)
 
   // Autopilot
   ruckig::Trajectory<3> reference_trajectory_;
@@ -186,7 +187,7 @@ class PlannerNode : public rclcpp::Node {
   rclcpp::Time time_of_switch_to_current_state_{0, 0, RCL_ROS_TIME};
   rclcpp::Time _latest_pose_stamp{0, 0, RCL_ROS_TIME};
   rclcpp::Time _latest_twist_stamp{0, 0, RCL_ROS_TIME};
-  mavros_msgs::msg::State flight_controller_status;
+  mavros_msgs::msg::State flight_controller_status;  // Protected by fc_status_mutex_
   Eigen::Vector3d initial_start_position_;
   Eigen::Vector3d initial_land_position_;
 
