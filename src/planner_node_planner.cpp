@@ -279,6 +279,11 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
         opus_should_abort_replanning()) {
       opus_abort_planning(
         "No feasible trajectory found within local OPUS replanning timeout");
+      // Re-arm so the drone retries on the next planning cycle.
+      // Unlike terminal aborts (Goal reached, Brake, Land), a replan
+      // timeout is transient — the situation may change next frame.
+      const std::lock_guard<std::mutex> olock(opus_mutex_);
+      opus_submission_needed_ = true;
     }
     return;
   }
