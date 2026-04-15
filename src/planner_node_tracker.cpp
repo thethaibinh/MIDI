@@ -171,10 +171,17 @@ void PlannerNode::track_trajectory() {
       // Takeoff to goal altitude at current XY position
       reference_point.position = Eigen::Vector3d(_home_in_world_frame.x, _home_in_world_frame.y, _goal_in_world_frame.z);
     }
-  } else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) || _planner_state == PlanningStates::GO_TO_GOAL) {
+  } else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL && had_reference_trajectory) ||
+             (_planner_state == PlanningStates::GO_TO_GOAL && had_reference_trajectory)) {
     rclcpp::Duration trajectory_point_time = command_execution_time - _reference_trajectory_start_time;
     double point_time = trajectory_point_time.seconds();
     get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
+  } else if (_planner_state == PlanningStates::GO_TO_GOAL && !had_reference_trajectory) {
+    // Stuck detection fallback: no trajectory was ever accepted, track directly to goal
+    reference_point.position = geometryToEigen(_goal_in_world_frame);
+    reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
+    reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
+    reference_point.heading = _goal_heading;
   }
 
   // In TRAJECTORY_CONTROL, face toward trajectory terminal rather than global goal

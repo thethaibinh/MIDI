@@ -239,9 +239,7 @@ void PlannerNode::update_planner_state() {
   // WAITING_FOR_OPUS → grant → no trajectory → abort → re-request.
   else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL ||
             _planner_state == PlanningStates::WAITING_FOR_OPUS) &&
-           (distance_to_goal < _go_to_goal_threshold ||
-            ((_state.pose.position.y + _go_to_goal_threshold / 10) > _goal_in_world_frame.y &&
-             _runtime_mode == RuntimeModes::MAVROS))) {
+           (distance_to_goal < _go_to_goal_threshold)) {
     if (_waypoint_mission_active) {
       // Abort any OPUS planning state since we're done with this segment
       opus_abort_planning("Waypoint reached, advancing");
