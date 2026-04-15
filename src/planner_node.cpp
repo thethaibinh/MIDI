@@ -97,7 +97,7 @@ PlannerNode::PlannerNode()
     std::bind(&PlannerNode::reinitialise_callback, this, std::placeholders::_1),
     control_sub_opts);
 
-  // Brake subscriber — emergency hold at current position (dead-end state)
+  // Brake subscriber — emergency hold at current position (dead-end state, only way out is LAND or RESET)
   brake_sub_ = this->create_subscription<std_msgs::msg::Empty>(
     "/brake", 10,
     std::bind(&PlannerNode::brake_callback, this, std::placeholders::_1),

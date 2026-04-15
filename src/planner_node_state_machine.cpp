@@ -99,7 +99,7 @@ void PlannerNode::update_planner_state() {
     return;  // Don't proceed with other state logic while waiting for FC
   }
 
-  // BRAKE is a dead-end state — no transitions out, only holds position
+  // BRAKE is a dead-end state — no transitions out except via LAND or RESET, only holds position
   if (_planner_state == PlanningStates::BRAKE) {
     // MAVROS: send BRAKE mode switch once
     if (_runtime_mode == RuntimeModes::MAVROS && !brake_mode_switch_sent_ && !mode_switch_pending_) {
@@ -127,7 +127,7 @@ void PlannerNode::update_planner_state() {
           });
       }
     }
-    return;  // Nothing escapes BRAKE
+    return;  // Nothing escapes BRAKE except via LAND or RESET
   }
 
   // LAND: for OmniDrones, check if drone reached initial altitude → reset

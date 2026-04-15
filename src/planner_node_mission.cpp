@@ -424,7 +424,7 @@ void PlannerNode::brake_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
 
-  // Switch to BRAKE — dead-end state, nothing escapes
+  // Switch to BRAKE
   set_auto_pilot_state_forced(PlanningStates::BRAKE);
 }
 
