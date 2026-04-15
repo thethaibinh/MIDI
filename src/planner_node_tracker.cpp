@@ -11,7 +11,14 @@ void PlannerNode::update_reference_trajectory() {
   if (trajectory_queue_.empty()) {
     // OPUS mode: if no approved trajectory and not already requesting,
     // trigger OPUS submission so the next img_callback can submit.
-    if (opus_enabled_ && had_reference_trajectory && !opus_submission_needed_) {
+    // Only re-arm in active planning states — after Goal reached / Brake /
+    // Land the drone must NOT submit new trajectories (its CANCEL already
+    // removed it from the coordinator's trajectory database).
+    if (opus_enabled_ && had_reference_trajectory && !opus_submission_needed_ &&
+        (_planner_state == PlanningStates::TRAJECTORY_CONTROL ||
+         _planner_state == PlanningStates::WAITING_FOR_OPUS ||
+         _planner_state == PlanningStates::ALIGNING_HEADING ||
+         _planner_state == PlanningStates::HOLDING_WAYPOINT)) {
       rclcpp::Time wall_time_now = this->now();
       rclcpp::Duration trajectory_point_time = wall_time_now - _reference_trajectory_start_time;
       double point_time = trajectory_point_time.seconds();
