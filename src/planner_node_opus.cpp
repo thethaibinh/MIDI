@@ -153,11 +153,11 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
   bool was_queued_or_granted = false;
   {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
-    if (!opus_enabled_ || !(opus_granted_ || opus_lock_pending_)) {
+    if (!opus_enabled_) {
       return;
     }
 
-    was_queued_or_granted = true;
+    was_queued_or_granted = opus_granted_ || opus_lock_pending_;
     if (opus_granted_) {
       elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - opus_grant_time_).count();
@@ -171,9 +171,11 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
     opus_pre_queue_.reset();
   }
 
-  // Publish CANCEL on the lock-request topic so the coordinator dequeues us
-  // or releases the lock.
-  if (was_queued_or_granted && opus_lock_req_pub_) {
+  // Always publish CANCEL so the coordinator removes our trajectory from
+  // the database.  Past trajectory phases can never collide with future
+  // ones (time non-overlap), so the only effect is clearing the virtual
+  // hold — correct because the drone is leaving its endpoint.
+  if (opus_lock_req_pub_) {
     OpusPlanLockReqMsg req;
     req.drone_id = opus_drone_id_;
     req.plan_sequence = opus_plan_sequence_;
