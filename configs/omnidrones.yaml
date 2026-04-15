@@ -44,8 +44,8 @@ depth_age_threshold: 0.1            # Max age of depth image (seconds) before re
 state_age_threshold: 0.1            # Max age of state estimate (seconds) before rejection
 transform_age_threshold: 0.1        # Max age of TF transforms (seconds) before rejection
 
-3d_planning: yes                 # Use 3D planning
-2d_z_margin: 0.2
+3d_planning: no                 # Use 3D planning
+2d_z_margin: 0.1
 traveling_cost: "direction"          # "direction" or "distance"
 replan_factor: 3.0
 debug_num_trajectories: no

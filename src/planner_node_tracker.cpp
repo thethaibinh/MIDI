@@ -160,7 +160,7 @@ void PlannerNode::track_trajectory() {
   reference_point.position = geometryToEigen(_state.pose.position);
   reference_point.velocity = Eigen::Vector3d(0.0, 0.0, 0.0);
   reference_point.acceleration = Eigen::Vector3d(0.0, 0.0, 0.0);
-  reference_point.heading = 0.0;
+  reference_point.heading = _initial_heading;
 
   if (_planner_state == PlanningStates::TAKING_OFF || (_planner_state == PlanningStates::TRAJECTORY_CONTROL && !had_reference_trajectory)) {
     _reference_trajectory_start_time = command_execution_time;
