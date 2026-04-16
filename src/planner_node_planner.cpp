@@ -67,9 +67,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   geometry_msgs::msg::TransformStamped world_to_body, body_to_world;
   geometry_msgs::msg::Point position_world_frame;
   geometry_msgs::msg::Vector3 velocity_world_frame;
-  geometry_msgs::msg::Vector3 acceleration_world_frame;
   geometry_msgs::msg::Vector3 velocity_body_frame;
-  geometry_msgs::msg::Vector3 acceleration_body_frame;
   double state_timestamp;
 
   // Snapshot _state under the lock, then release. TF2 has its own internal
@@ -81,10 +79,8 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     position_world_frame = _state.pose.position;
     if (_runtime_mode == RuntimeModes::OMNIDRONES) {
       velocity_world_frame = _state.velocity.linear;
-      acceleration_world_frame = _state.acceleration.linear;
     } else if (_runtime_mode == RuntimeModes::MAVROS) {
       velocity_body_frame = _state.velocity.linear;
-      acceleration_body_frame = _state.acceleration.linear;
     }
   }
 
@@ -119,12 +115,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
 
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     tf2::doTransform(velocity_world_frame, velocity_body_frame, world_to_body);
-    tf2::doTransform(acceleration_world_frame, acceleration_body_frame, world_to_body);
   }
-  tf2::doTransform(acceleration_body_frame, acceleration_world_frame, body_to_world);
-
-  if (std::fabs(acceleration_world_frame.x) > _acc_planning_threshold || std::fabs(acceleration_world_frame.y) > _acc_planning_threshold)
-    return;
 
   if (std::fabs(velocity_body_frame.y) > _vel_planning_threshold || std::fabs(velocity_body_frame.z) > _vel_planning_threshold)
     return;
@@ -132,9 +123,6 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
   // Transform from body frame (FLU) to camera frame (RDF)
   frame_transform::transform_body_to_camera(velocity_body_frame, velocity_camera_frame);
-  if (_collision_checking_method == CollisionCheckingMethod::PYRAMID) {
-    frame_transform::transform_body_to_camera(acceleration_body_frame, acceleration_camera_frame);
-  }
 
   ruckig::InputParameter<3> initial_state_camera_frame;
   double forward_time = _planning_cycle_time + (time_now.seconds() - state_timestamp);
