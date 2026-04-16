@@ -72,70 +72,78 @@ void PlannerNode::opus_trajectory_ack_callback(
     return;
   }
 
-  const std::lock_guard<std::mutex> olock(opus_mutex_);
+  // Snapshot OPUS state under opus_mutex_, then release it BEFORE locking
+  // trajectory_mutex_.  update_reference_trajectory() locks in the opposite
+  // order (trajectory → opus), so nesting opus → trajectory here would
+  // deadlock when both fire concurrently.
+  bool accepted = false;
+  bool structural_reject = false;
+  bool collision_reject = false;
+  rclcpp::Time submit_t{0, 0, RCL_ROS_TIME};
+  ruckig::Trajectory<3> accepted_trajectory;
+  std::string reject_reason;
 
-  // Stale-ack guard: plan_sequence has moved on (abort/reset) → discard silently.
-  if (msg->plan_sequence != opus_plan_sequence_) {
-    RCLCPP_WARN(this->get_logger(),
-      "OPUS: Discarding stale trajectory ack (seq %u, current %u)",
-      msg->plan_sequence, opus_plan_sequence_);
-    return;
-  }
+  {
+    const std::lock_guard<std::mutex> olock(opus_mutex_);
 
-  opus_check_pending_ = false;
+    // Stale-ack guard: plan_sequence has moved on (abort/reset) → discard silently.
+    if (msg->plan_sequence != opus_plan_sequence_) {
+      RCLCPP_WARN(this->get_logger(),
+        "OPUS: Discarding stale trajectory ack (seq %u, current %u)",
+        msg->plan_sequence, opus_plan_sequence_);
+      return;
+    }
 
-  if (msg->accepted) {
-    opus_granted_ = false;
-    opus_grant_time_ = std::chrono::steady_clock::time_point{};
+    opus_check_pending_ = false;
 
-    RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
-                msg->plan_sequence);
-    // Submission complete — let the natural replan trigger in
-    // update_reference_trajectory() re-arm after the drone has consumed
-    // ~1/3 of the trajectory.  Setting true here caused a tight 40ms
-    // accept→request→grant→submit loop that monopolised the OPUS lock.
-    opus_submission_needed_ = false;
-    opus_pre_queue_.reset();
+    if (msg->accepted) {
+      accepted = true;
+      opus_granted_ = false;
+      opus_grant_time_ = std::chrono::steady_clock::time_point{};
 
-    // Snapshot submission time while opus_mutex_ is held, then carry it
-    // into the tracker so the accepted trajectory's t=0 is anchored to the
-    // moment we published /opus/trajectory_submit, skipping the grant/ack
-    // round-trip instead of replaying a stale t=0 at wall_now.
-    const rclcpp::Time submit_t = opus_submission_time_;
+      RCLCPP_INFO(this->get_logger(), "OPUS: Trajectory ACCEPTED (seq=%u) — executing",
+                  msg->plan_sequence);
+      opus_submission_needed_ = false;
+      opus_pre_queue_.reset();
+
+      submit_t = opus_submission_time_;
+      accepted_trajectory = opus_pending_trajectory_;
+    } else {
+      reject_reason = msg->reason;
+      RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s",
+                  reject_reason.c_str());
+      structural_reject = (reject_reason.find("Stale") != std::string::npos ||
+                           reject_reason.find("Lock not held") != std::string::npos);
+      collision_reject = !structural_reject;
+
+      if (structural_reject) {
+        opus_granted_ = false;
+        opus_lock_pending_ = false;
+        opus_submission_needed_ = false;
+        opus_grant_time_ = std::chrono::steady_clock::time_point{};
+        opus_pre_queue_.reset();
+      } else {
+        RCLCPP_WARN(this->get_logger(),
+          "OPUS: Collision — releasing lock, will re-request (seq=%u)",
+          opus_plan_sequence_);
+        opus_granted_ = false;
+        opus_lock_pending_ = false;
+        opus_submission_needed_ = true;
+        opus_grant_time_ = std::chrono::steady_clock::time_point{};
+        opus_pre_queue_.reset();
+      }
+    }
+  }  // opus_mutex_ released
+
+  // Now safe to lock trajectory_mutex_ without risk of deadlock.
+  if (accepted) {
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
-    trajectory_queue_.push_back(opus_pending_trajectory_);
+    trajectory_queue_.push_back(accepted_trajectory);
     pending_trajectory_start_time_override_ = submit_t;
     if (_planner_state == PlanningStates::WAITING_FOR_OPUS) {
       set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
-    }
-  } else {
-    RCLCPP_WARN(this->get_logger(), "OPUS: Trajectory REJECTED by GCS: %s",
-                msg->reason.c_str());
-    // Structural rejection (stale seq, lock not held) → GCS already released
-    // the lock; clear state so we re-request. Collision rejection → lock
-    // retained, retry with a new trajectory next frame.
-    bool structural = (msg->reason.find("Stale") != std::string::npos ||
-                       msg->reason.find("Lock not held") != std::string::npos);
-    if (structural) {
-      opus_granted_ = false;
-      opus_lock_pending_ = false;
-      opus_submission_needed_ = false;
-      opus_grant_time_ = std::chrono::steady_clock::time_point{};
-      opus_pre_queue_.reset();
-    } else {
-      // Collision rejection — release lock so other drones can proceed.
-      // We'll re-request on the next planning cycle; by then the situation
-      // may have changed (other drone moved, different depth frame).
-      RCLCPP_WARN(this->get_logger(),
-        "OPUS: Collision — releasing lock, will re-request (seq=%u)",
-        opus_plan_sequence_);
-      opus_granted_ = false;
-      opus_lock_pending_ = false;
-      opus_submission_needed_ = true;
-      opus_grant_time_ = std::chrono::steady_clock::time_point{};
-      opus_pre_queue_.reset();
     }
   }
 }
