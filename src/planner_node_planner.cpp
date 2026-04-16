@@ -123,10 +123,10 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   }
   tf2::doTransform(acceleration_body_frame, acceleration_world_frame, body_to_world);
 
-  if (acceleration_world_frame.x > _acc_planning_threshold || acceleration_world_frame.y > _acc_planning_threshold)
+  if (std::fabs(acceleration_world_frame.x) > _acc_planning_threshold || std::fabs(acceleration_world_frame.y) > _acc_planning_threshold)
     return;
-  
-  if (velocity_body_frame.x < 0.0 || velocity_body_frame.y > _vel_planning_threshold || velocity_body_frame.z > _vel_planning_threshold)
+
+  if (velocity_body_frame.x < 0.0 || std::fabs(velocity_body_frame.y) > _vel_planning_threshold || std::fabs(velocity_body_frame.z) > _vel_planning_threshold)
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
