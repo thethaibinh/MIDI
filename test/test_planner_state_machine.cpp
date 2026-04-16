@@ -147,15 +147,32 @@ struct PlannerStateMachine {
     }
   }
 
-  /// TRAJECTORY_CONTROL → HOLDING_WAYPOINT / GO_TO_GOAL on goal reached
+  /// TRAJECTORY_CONTROL → HOLDING_WAYPOINT / GO_TO_GOAL on near goal OR passing half-space
   void check_goal_reached() {
     if (planner_state != PlanningStates::TRAJECTORY_CONTROL) return;
-    // 2D distance (z matched to current altitude, same as real code)
+
+    // Half-space check: (drone_xy - goal_xy) · (goal_xy - prev_xy) > 0
+    Eigen::Vector2d segment_start_xy;
+    if (waypoint_mission_active && current_waypoint_index > 0) {
+      segment_start_xy << world_waypoints[current_waypoint_index - 1].x(),
+                          world_waypoints[current_waypoint_index - 1].y();
+    } else {
+      segment_start_xy << home.x(), home.y();
+    }
+    Eigen::Vector2d goal_xy(goal.x(), goal.y());
+    Eigen::Vector2d drone_xy(position.x(), position.y());
+    Eigen::Vector2d seg_dir = goal_xy - segment_start_xy;
+    double seg_len_sq = seg_dir.squaredNorm();
+
     double dx = position.x() - goal.x();
     double dy = position.y() - goal.y();
     double distance = std::sqrt(dx * dx + dy * dy);
 
-    if (distance < kGoToGoalThreshold) {
+    bool passed = (seg_len_sq > 1e-6)
+        ? (drone_xy - goal_xy).dot(seg_dir) > 0.0
+        : false;
+
+    if (distance < kGoToGoalThreshold || passed) {
       if (waypoint_mission_active) {
         set_state(PlanningStates::HOLDING_WAYPOINT);
       } else {
@@ -464,35 +481,102 @@ TEST(PlannerStateMachine, HeadingWrapAround) {
 // ============================================================================
 
 TEST(PlannerStateMachine, GoalReachedWaypointMission) {
+  // Drone has crossed the perpendicular line at the waypoint (past goal along segment)
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
   sm.waypoint_mission_active = true;
-  sm.goal = Eigen::Vector3d(1.0, 0.0, 1.5);
-  sm.position = Eigen::Vector3d(1.1, 0.1, 1.5);  // dist ~0.14 < 0.5
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);      // segment start
+  sm.goal = Eigen::Vector3d(1.0, 0.0, 1.5);       // segment end
+  sm.position = Eigen::Vector3d(1.1, 0.1, 1.5);   // past the goal along +X
 
   sm.check_goal_reached();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::HOLDING_WAYPOINT);
 }
 
 TEST(PlannerStateMachine, GoalReachedFinalGoal) {
+  // Drone has crossed the perpendicular line at the final goal
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
   sm.waypoint_mission_active = false;
-  sm.goal = Eigen::Vector3d(1.0, 0.0, 1.5);
-  sm.position = Eigen::Vector3d(1.0, 0.0, 1.5);
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);      // segment start
+  sm.goal = Eigen::Vector3d(1.0, 0.0, 1.5);       // segment end
+  sm.position = Eigen::Vector3d(1.01, 0.0, 1.5);  // just past the goal
 
   sm.check_goal_reached();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::GO_TO_GOAL);
 }
 
 TEST(PlannerStateMachine, GoalNotReachedStaysInTrajectoryControl) {
+  // Drone is still on the start side of the perpendicular line at the goal
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
-  sm.goal = Eigen::Vector3d(10.0, 0.0, 1.5);
-  sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);  // dist = 10
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);       // segment start
+  sm.goal = Eigen::Vector3d(10.0, 0.0, 1.5);       // segment end
+  sm.position = Eigen::Vector3d(5.0, 0.0, 1.5);    // halfway — not past goal
 
   sm.check_goal_reached();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::TRAJECTORY_CONTROL);
+}
+
+TEST(PlannerStateMachine, GoalReachedViaHalfSpaceNotDistance) {
+  // Drone crosses the perpendicular line but is far from the goal in absolute
+  // distance — half-space check triggers anyway (correct behaviour: the drone
+  // has overshot sideways but is past the goal along the segment direction).
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
+  sm.waypoint_mission_active = false;
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);
+  sm.goal = Eigen::Vector3d(10.0, 0.0, 1.5);
+  sm.position = Eigen::Vector3d(10.1, 5.0, 1.5);  // past goal, but 5m off-axis
+
+  sm.check_goal_reached();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::GO_TO_GOAL);
+}
+
+TEST(PlannerStateMachine, GoalNotReachedFarAndBeforeHalfSpace) {
+  // Drone is before the perpendicular line AND farther than the distance
+  // threshold — neither condition fires, stays in TRAJECTORY_CONTROL.
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
+  sm.waypoint_mission_active = false;
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);
+  sm.goal = Eigen::Vector3d(10.0, 0.0, 1.5);
+  sm.position = Eigen::Vector3d(8.0, 0.0, 1.5);   // dist = 2.0, before line
+
+  sm.check_goal_reached();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::TRAJECTORY_CONTROL);
+}
+
+TEST(PlannerStateMachine, GoalReachedCloseButBeforeHalfSpace) {
+  // Drone is within distance threshold but hasn't crossed the half-space —
+  // should still transition because distance alone is sufficient.
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
+  sm.waypoint_mission_active = false;
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);
+  sm.goal = Eigen::Vector3d(10.0, 0.0, 1.5);
+  sm.position = Eigen::Vector3d(9.8, 0.1, 1.5);   // dist ~0.22 < 0.5, before line
+
+  sm.check_goal_reached();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::GO_TO_GOAL);
+}
+
+TEST(PlannerStateMachine, GoalReachedSecondWaypointUsesFirstAsSegmentStart) {
+  // Second waypoint: segment direction is from WP0 to WP1, not from home
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
+  sm.waypoint_mission_active = true;
+  sm.home = Eigen::Vector3d(0.0, 0.0, 1.5);
+  sm.world_waypoints = {
+    Eigen::Vector3d(5.0, 0.0, 1.5),   // WP0
+    Eigen::Vector3d(5.0, 5.0, 1.5),   // WP1 — segment goes in +Y from WP0
+  };
+  sm.current_waypoint_index = 1;
+  sm.goal = sm.world_waypoints[1];
+  sm.position = Eigen::Vector3d(5.0, 5.1, 1.5);   // past WP1 along +Y
+
+  sm.check_goal_reached();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::HOLDING_WAYPOINT);
 }
 
 
@@ -976,7 +1060,7 @@ TEST(PlannerStateMachine, FullMissionCycleOmniDrones) {
   sm.check_heading_aligned();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::TRAJECTORY_CONTROL);
 
-  // 3. Reach WP0
+  // 3. Reach WP0 (distance < threshold triggers)
   sm.position = sm.world_waypoints[0];
   sm.check_goal_reached();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::HOLDING_WAYPOINT);

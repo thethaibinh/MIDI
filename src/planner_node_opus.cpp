@@ -198,9 +198,8 @@ void PlannerNode::opus_abort_planning(const std::string& reason) {
   }
 
   // Always publish CANCEL so the coordinator removes our trajectory from
-  // the database.  Past trajectory phases can never collide with future
-  // ones (time non-overlap), so the only effect is clearing the virtual
-  // hold — correct because the drone is leaving its endpoint.
+  // the database and clears the endpoint hold polynomial, allowing other
+  // drones to fly through our old position.
   if (opus_lock_req_pub_) {
     OpusPlanLockReqMsg req;
     req.drone_id = opus_drone_id_;

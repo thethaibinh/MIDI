@@ -174,10 +174,24 @@ void PlannerNode::update_planner_state() {
   goal_in_world_frame.z = _state.pose.position.z;
   double distance_to_goal = (geometryToEigen(_state.pose.position) - geometryToEigen(goal_in_world_frame)).norm();
 
-  // Debug: print state transition values
-  // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-  //     "State check: current_z=%.2f, goal_z=%.2f, threshold=%.2f, state=%d",
-  //     _state.pose.position.z, _goal_in_world_frame.z, _goal_in_world_frame.z - 0.1, (int)_planner_state);
+  // Half-space check: has the drone crossed the perpendicular line at the goal,
+  // drawn normal to the segment from the previous waypoint (or home) to the goal?
+  // (drone_xy - goal_xy) · (goal_xy - prev_xy) > 0 means the drone has passed the goal.
+  Eigen::Vector2d segment_start_xy;
+  if (_waypoint_mission_active && _current_waypoint_index > 0) {
+    segment_start_xy << _world_waypoints[_current_waypoint_index - 1].x(),
+                        _world_waypoints[_current_waypoint_index - 1].y();
+  } else {
+    segment_start_xy << _home_in_world_frame.x, _home_in_world_frame.y;
+  }
+  Eigen::Vector2d goal_xy(_goal_in_world_frame.x, _goal_in_world_frame.y);
+  Eigen::Vector2d drone_xy(_state.pose.position.x, _state.pose.position.y);
+  Eigen::Vector2d seg_dir = goal_xy - segment_start_xy;
+  double seg_len_sq = seg_dir.squaredNorm();
+  // Half-space for non-degenerate segments; fall back to distance for zero-length
+  bool passed_goal_halfspace = (seg_len_sq > 1e-6)
+      ? (drone_xy - goal_xy).dot(seg_dir) > 0.0
+      : (distance_to_goal < _go_to_goal_threshold);
 
   // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached
   // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
@@ -237,15 +251,14 @@ void PlannerNode::update_planner_state() {
       }
     }
   }
-  // Transition to GO_TO_GOAL / HOLDING_WAYPOINT when near goal
-  // Check both TRAJECTORY_CONTROL and WAITING_FOR_OPUS — the drone may reach
-  // the goal vicinity while still waiting for OPUS (e.g. carried by inertia
-  // or the goal was already close). Without this, a drone near the goal that
-  // can't find feasible trajectories (too close) loops forever in
-  // WAITING_FOR_OPUS → grant → no trajectory → abort → re-request.
+  // Transition to GO_TO_GOAL / HOLDING_WAYPOINT when the drone is near the goal
+  // OR has crossed the perpendicular line at the goal (half-space check along
+  // the segment from the previous waypoint to the current goal).
+  // Also fires from WAITING_FOR_OPUS — the drone may be carried past the goal
+  // by inertia while waiting for OPUS.
   else if ((_planner_state == PlanningStates::TRAJECTORY_CONTROL ||
             _planner_state == PlanningStates::WAITING_FOR_OPUS) &&
-           (distance_to_goal < _go_to_goal_threshold)) {
+           (distance_to_goal < _go_to_goal_threshold || passed_goal_halfspace)) {
     if (_waypoint_mission_active) {
       // Abort any OPUS planning state since we're done with this segment
       opus_abort_planning("Waypoint reached, advancing");
