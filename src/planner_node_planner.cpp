@@ -225,14 +225,26 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
           std::chrono::steady_clock::now() - opus_grant_time_).count();
       if (elapsed > opus_ack_timeout_) {
         RCLCPP_WARN(this->get_logger(),
-            "OPUS: Ack timeout after %.1fs — clearing and re-requesting",
+            "OPUS: Ack timeout after %.3fs — sending CANCEL and re-requesting",
             elapsed);
+        // Bump sequence so any in-flight stale ack is discarded
+        ++opus_plan_sequence_;
         opus_check_pending_ = false;
         opus_granted_ = false;
         opus_lock_pending_ = false;
         opus_submission_needed_ = true;
         opus_grant_time_ = std::chrono::steady_clock::time_point{};
         opus_pre_queue_.reset();
+
+        // Notify coordinator so it releases the lock immediately
+        // instead of waiting for its own lock_timeout (10s).
+        if (opus_lock_req_pub_) {
+          OpusPlanLockReqMsg req;
+          req.drone_id = opus_drone_id_;
+          req.plan_sequence = opus_plan_sequence_;
+          req.action = OpusPlanLockReqMsg::ACTION_CANCEL;
+          opus_lock_req_pub_->publish(req);
+        }
       }
     }
 

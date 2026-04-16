@@ -365,7 +365,7 @@ class PlannerNode : public rclcpp::Node {
   // OPUS timeout tracking (monotonic clock)
   std::chrono::steady_clock::time_point opus_grant_time_{};
   static constexpr double kOpusLocalReplanTimeout_ = 30.0;  // seconds before aborting local replanning
-  static constexpr double kOpusAckTimeout_ = 2.0;  // seconds before treating a missing ack as lost
+  static constexpr double kOpusAckTimeout_ = 0.02;  // seconds before treating a missing ack as lost
   double opus_ack_timeout_ = kOpusAckTimeout_;
 };
 
