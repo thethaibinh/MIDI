@@ -126,7 +126,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   if (acceleration_world_frame.x > _acc_planning_threshold || acceleration_world_frame.y > _acc_planning_threshold)
     return;
   
-  if (velocity_body_frame.y > _vel_planning_threshold || velocity_body_frame.z > _vel_planning_threshold)
+  if (velocity_body_frame.x < 0.0 || velocity_body_frame.y > _vel_planning_threshold || velocity_body_frame.z > _vel_planning_threshold)
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
@@ -144,6 +144,15 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     velocity_camera_frame.z * forward_time
   };
   initial_state_camera_frame.current_velocity = {velocity_camera_frame.x, velocity_camera_frame.y, velocity_camera_frame.z};
+  // Clamp near-zero negative forward velocity to prevent spurious monotonic
+  // rejection: noise-level backward velocity (between 0 and -1e-3 m/s) falls
+  // in the deadband between zero and the allow_non_monotonic threshold in
+  // du_planner, causing 100% trajectory rejection while hovering.
+  if (initial_state_camera_frame.current_velocity[2] > -1e-3 &&
+      initial_state_camera_frame.current_velocity[2] < 0.0) {
+    initial_state_camera_frame.current_velocity[2] = 0.0;
+    initial_state_camera_frame.current_position[2] = 0.0;
+  }
   initial_state_camera_frame.target_velocity = {0.0, 0.0, 0.0};
   initial_state_camera_frame.max_velocity = {_max_velocity_x, _max_velocity_y, _max_velocity_z};
   initial_state_camera_frame.max_acceleration = {_max_acceleration_x, _max_acceleration_y, _max_acceleration_z};
