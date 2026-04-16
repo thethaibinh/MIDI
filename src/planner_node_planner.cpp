@@ -256,11 +256,13 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     } else if (have_entry) {
       RCLCPP_INFO(this->get_logger(),
         "OPUS: Submitting pre-queued trajectory (GCS collision check)");
+      const rclcpp::Time submit_time = this->now();
       opus_submit_trajectory(fast_entry.trajectory,
                              fast_entry.body_to_world, fast_entry.world_position);
       {
         std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_pending_trajectory_ = fast_entry.trajectory;
+        opus_submission_time_ = submit_time;
         opus_check_pending_ = true;
         opus_submission_needed_ = false;
         opus_pre_queue_.reset();
@@ -310,10 +312,12 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
     }
     if (opus_ready_to_submit) {
       // Submit directly — GCS performs collision check
+      const rclcpp::Time submit_time = this->now();
       opus_submit_trajectory(opt_traj, body_to_world, position_world_frame);
       {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_pending_trajectory_ = opt_traj;
+        opus_submission_time_ = submit_time;
         opus_check_pending_ = true;
         opus_submission_needed_ = false;
         opus_pre_queue_.reset();

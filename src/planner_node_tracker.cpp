@@ -43,12 +43,17 @@ void PlannerNode::update_reference_trajectory() {
   double point_time = trajectory_point_time.seconds();
   if (trajectory_queue_.size() > 0) {
     bool trajectory_updated = false;
+    // OPUS-accepted trajectories carry a submission-time override so t=0
+    // lines up with the submit instant, not ack-reception time. Non-OPUS
+    // pushes leave the override empty, falling back to wall_now.
+    const rclcpp::Time start_time_for_new_traj =
+      pending_trajectory_start_time_override_.value_or(wall_time_now);
     // Only track when there is a valid trajectory
     if (!had_reference_trajectory) {
       _steered = false;
       steering_value = 0.0f;
       reference_trajectory_ = trajectory_queue_.front();
-      _reference_trajectory_start_time = wall_time_now;
+      _reference_trajectory_start_time = start_time_for_new_traj;
       had_reference_trajectory = true;
       trajectory_updated = true;
     }
@@ -56,10 +61,13 @@ void PlannerNode::update_reference_trajectory() {
       _steered = false;
       steering_value = 0.0f;
       reference_trajectory_ = trajectory_queue_.front();
-      _reference_trajectory_start_time = wall_time_now;
+      _reference_trajectory_start_time = start_time_for_new_traj;
       trajectory_updated = true;
     }
     trajectory_queue_.pop_front();
+    // Consume the override regardless of adoption: the queue is always
+    // drained here, and a stale override must not leak into the next push.
+    pending_trajectory_start_time_override_.reset();
 
     // Compute heading from trajectory initial to terminal position in world frame
     if (trajectory_updated) {

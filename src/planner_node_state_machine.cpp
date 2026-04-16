@@ -219,12 +219,18 @@ void PlannerNode::update_planner_state() {
       {
         const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
         trajectory_queue_.clear();
+        pending_trajectory_start_time_override_.reset();
       }
-      // OPUS: trigger immediate submission on the first planned trajectory
+      // OPUS: trigger immediate submission on the first planned trajectory.
+      // Do NOT reset opus_pre_queue_ here — it was already cleared on the
+      // HOLDING_WAYPOINT → ALIGNING_HEADING transition, and img_callback is
+      // gated to TRAJECTORY_CONTROL/WAITING_FOR_OPUS so nothing repopulates
+      // it during alignment. Leaving it alone lets any future change that
+      // populates the pre-queue earlier carry the entry across so the
+      // fast-path can submit immediately on grant.
       if (opus_enabled_) {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_submission_needed_ = true;
-        opus_pre_queue_.reset();
         set_auto_pilot_state_forced(PlanningStates::WAITING_FOR_OPUS);
       } else {
         set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
@@ -354,6 +360,7 @@ void PlannerNode::set_auto_pilot_state_forced(const PlanningStates& new_state) {
     if (!trajectory_queue_.empty()) {
       trajectory_queue_.clear();
     }
+    pending_trajectory_start_time_override_.reset();
   }
   time_of_switch_to_current_state_ = time_now;
   _planner_state.store(new_state, std::memory_order_release);

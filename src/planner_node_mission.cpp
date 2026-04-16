@@ -114,6 +114,7 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
+    pending_trajectory_start_time_override_.reset();
     reference_trajectory_ = ruckig::Trajectory<3>();
     had_reference_trajectory = false;
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
@@ -146,6 +147,7 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.clear();
+    pending_trajectory_start_time_override_.reset();
     reference_trajectory_ = ruckig::Trajectory<3>();
     had_reference_trajectory = false;
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
@@ -173,6 +175,7 @@ void PlannerNode::reset_planner() {
   _reinitialise_requested = false;
   brake_mode_switch_sent_ = false;
   trajectory_queue_.clear();
+  pending_trajectory_start_time_override_.reset();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
   // Reset fence breach recovery state
@@ -421,6 +424,7 @@ void PlannerNode::brake_callback(const std_msgs::msg::Empty::SharedPtr msg) {
 
   // Clear trajectory state
   trajectory_queue_.clear();
+  pending_trajectory_start_time_override_.reset();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
 
@@ -450,6 +454,7 @@ void PlannerNode::land_swarm_callback(const std_msgs::msg::Empty::SharedPtr msg)
 
   // Clear trajectory state
   trajectory_queue_.clear();
+  pending_trajectory_start_time_override_.reset();
   reference_trajectory_ = ruckig::Trajectory<3>();
   had_reference_trajectory = false;
 

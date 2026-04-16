@@ -97,10 +97,16 @@ void PlannerNode::opus_trajectory_ack_callback(
     opus_submission_needed_ = false;
     opus_pre_queue_.reset();
 
+    // Snapshot submission time while opus_mutex_ is held, then carry it
+    // into the tracker so the accepted trajectory's t=0 is anchored to the
+    // moment we published /opus/trajectory_submit, skipping the grant/ack
+    // round-trip instead of replaying a stale t=0 at wall_now.
+    const rclcpp::Time submit_t = opus_submission_time_;
     const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
     steering_value = 0.0f;
     _steered = false;
     trajectory_queue_.push_back(opus_pending_trajectory_);
+    pending_trajectory_start_time_override_ = submit_t;
     if (_planner_state == PlanningStates::WAITING_FOR_OPUS) {
       set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
     }

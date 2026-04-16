@@ -194,6 +194,12 @@ class PlannerNode : public rclcpp::Node {
   // Trajectory execution variables
   std::list<ruckig::Trajectory<3>> trajectory_queue_;
   rclcpp::Time _reference_trajectory_start_time{0, 0, RCL_ROS_TIME};
+  // When set, the next trajectory installed by update_reference_trajectory()
+  // uses this wall-clock time as its t=0 anchor instead of "now". Used to
+  // compensate for the OPUS grant/ack round-trip so the first reference
+  // sampled from a just-accepted trajectory skips the latency gap rather
+  // than replaying a stale t=0. Protected by trajectory_mutex_.
+  std::optional<rclcpp::Time> pending_trajectory_start_time_override_;
 
   // Callback functions
   void sampling_mode_callback(const std_msgs::msg::Int8::SharedPtr msg);
@@ -335,6 +341,11 @@ class PlannerNode : public rclcpp::Node {
   uint8_t opus_drone_id_ = 0;
   uint32_t opus_plan_sequence_ = 0;    // Monotonic counter for correlating lock/check/abort
   ruckig::Trajectory<3> opus_pending_trajectory_;  // Trajectory awaiting check response
+  // Wall-clock time of the most recent /opus/trajectory_submit publish. On
+  // ack, this is forwarded to pending_trajectory_start_time_override_ so the
+  // accepted trajectory's t=0 aligns with the moment of submission (before
+  // the grant/check round-trip), not the moment of ack reception.
+  rclcpp::Time opus_submission_time_{0, 0, RCL_ROS_TIME};
   std::mutex opus_mutex_;
   double opus_local_replan_timeout_ = kOpusLocalReplanTimeout_;
 
