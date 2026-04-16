@@ -43,6 +43,25 @@ void PlannerNode::opus_status_callback(
     opus_grant_time_ = std::chrono::steady_clock::now();
     RCLCPP_INFO(this->get_logger(),
       "OPUS: Planning lock GRANTED via status (seq=%u)", opus_plan_sequence_);
+
+    // Fast-path: if a pre-queued trajectory is ready, submit it immediately
+    // instead of waiting for the next img_callback cycle (~50-100ms savings).
+    // opus_submit_trajectory only builds a message and publishes — no mutex
+    // acquisition, safe to call while holding opus_mutex_.
+    if (opus_submission_needed_ && opus_pre_queue_.has_value()) {
+      const auto entry = opus_pre_queue_.value();
+      const rclcpp::Time submit_time = this->now();
+      RCLCPP_INFO(this->get_logger(),
+        "OPUS: Submitting pre-queued trajectory on grant (fast-path)");
+      opus_submit_trajectory(entry.trajectory,
+                             entry.body_to_world, entry.world_position);
+      opus_pending_trajectory_ = entry.trajectory;
+      opus_submission_time_ = submit_time;
+      opus_check_pending_ = true;
+      opus_submission_needed_ = false;
+      opus_granted_ = false;  // Lock consumed by submission
+      opus_pre_queue_.reset();
+    }
     return;
   }
 
