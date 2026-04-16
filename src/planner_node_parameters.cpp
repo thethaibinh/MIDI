@@ -7,6 +7,7 @@ bool PlannerNode::loadParameters() {
   this->declare_parameter<std::string>("scenario", "sitl");
   this->declare_parameter<std::string>("planner_config_path", "");
   this->declare_parameter<double>("opus_local_replan_timeout", 1.0);
+  this->declare_parameter<double>("opus_ack_timeout", kOpusAckTimeout_);
   
   std::string scenario_str;
   if (!this->get_parameter("scenario", scenario_str)) {
@@ -35,6 +36,7 @@ bool PlannerNode::loadParameters() {
     RCLCPP_ERROR(this->get_logger(), "Failed to get opus_local_replan_timeout parameter");
     return false;
   }
+  this->get_parameter("opus_ack_timeout", opus_ack_timeout_);
 
   // Load planner parameters
   YAML::Node planner_config;

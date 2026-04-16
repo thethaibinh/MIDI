@@ -56,6 +56,10 @@ struct OpusStateMachine {
   // Drone identity (for status callback filtering)
   uint8_t drone_id = 1;
 
+  // Ack timeout (matches opus_ack_timeout_ in planner_node.hpp)
+  double opus_ack_timeout = 2.0;
+  std::chrono::steady_clock::time_point opus_grant_time{};
+
   // ----- Transitions extracted from planner_node.cpp -----
 
   /// ALIGNING_HEADING → WAITING_FOR_OPUS (from update_planner_state ~line 883)
@@ -73,13 +77,32 @@ struct OpusStateMachine {
     }
   }
 
-  /// img_callback OPUS management block (~line 1651): decide what to do
-  enum class OpusAction { NONE, SEND_LOCK, READY_TO_SUBMIT, WAIT };
+  /// img_callback OPUS management block: decide what to do.
+  /// Matches the updated gate in planner_node_planner.cpp — enters the block
+  /// whenever opus_enabled && state_active (not gated on opus_submission_needed)
+  /// so the ack timeout can fire even after submission clears the flag.
+  enum class OpusAction { NONE, SEND_LOCK, READY_TO_SUBMIT, WAIT, ACK_TIMEOUT };
 
   OpusAction get_opus_action() {
-    if (!opus_enabled || !opus_submission_needed) return OpusAction::NONE;
+    if (!opus_enabled) return OpusAction::NONE;
     const std::lock_guard<std::mutex> lock(opus_mutex);
 
+    // Ack timeout check
+    if (opus_check_pending &&
+        opus_grant_time != std::chrono::steady_clock::time_point{}) {
+      double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - opus_grant_time).count();
+      if (elapsed > opus_ack_timeout) {
+        opus_check_pending = false;
+        opus_granted = false;
+        opus_lock_pending = false;
+        opus_submission_needed = true;
+        opus_grant_time = std::chrono::steady_clock::time_point{};
+        return OpusAction::ACK_TIMEOUT;
+      }
+    }
+
+    if (!opus_submission_needed) return OpusAction::NONE;
     if (opus_check_pending) return OpusAction::WAIT;
     if (opus_granted) return OpusAction::READY_TO_SUBMIT;
     if (!opus_lock_pending) return OpusAction::SEND_LOCK;
@@ -100,6 +123,7 @@ struct OpusStateMachine {
 
     if (permitted && echoed_seq == opus_plan_sequence) {
       opus_granted = true;
+      opus_grant_time = std::chrono::steady_clock::now();
     } else {
       opus_granted = false;
     }
@@ -147,6 +171,7 @@ struct OpusStateMachine {
     if (accepted) {
       opus_granted = false;
       opus_submission_needed = false;
+      opus_grant_time = std::chrono::steady_clock::time_point{};
       if (planner_state == PlanningStates::WAITING_FOR_OPUS) {
         planner_state = PlanningStates::TRAJECTORY_CONTROL;
       }
@@ -158,11 +183,13 @@ struct OpusStateMachine {
         opus_granted = false;
         opus_lock_pending = false;
         opus_submission_needed = false;
+        opus_grant_time = std::chrono::steady_clock::time_point{};
       } else {
         // Collision rejection → release lock, re-arm submission
         opus_granted = false;
         opus_lock_pending = false;
         opus_submission_needed = true;
+        opus_grant_time = std::chrono::steady_clock::time_point{};
       }
     }
   }
@@ -208,6 +235,7 @@ struct OpusStateMachine {
     if (opus_lock_pending && planning_drone_id == drone_id) {
       opus_lock_pending = false;
       opus_granted = true;
+      opus_grant_time = std::chrono::steady_clock::now();
       return;
     }
 
@@ -215,7 +243,8 @@ struct OpusStateMachine {
     if (opus_granted && planning_drone_id != drone_id) {
       opus_granted = false;
       opus_check_pending = false;
-      // Do NOT clear opus_submission_needed
+      opus_submission_needed = true;  // Re-arm so drone re-requests
+      opus_grant_time = std::chrono::steady_clock::time_point{};
     }
   }
 
@@ -229,6 +258,7 @@ struct OpusStateMachine {
     opus_check_pending = false;
     opus_lock_pending = false;
     opus_submission_needed = false;
+    opus_grant_time = std::chrono::steady_clock::time_point{};
     // In real code: also cancels goal_handle and publishes abort message
   }
 
@@ -797,4 +827,152 @@ TEST(OpusStateMachine, AcceptanceToReplanFullCycle) {
   sm.submit_trajectory();
   sm.trajectory_ack(true, 2);
   EXPECT_FALSE(sm.opus_submission_needed);
+}
+
+
+// ============================================================================
+// Test: Ack Timeout — Fires After Waiting Too Long
+// ============================================================================
+
+TEST(OpusStateMachine, AckTimeoutFiresAndRearmsSubmission) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::WAITING_FOR_OPUS;
+  sm.opus_submission_needed = true;
+  sm.opus_ack_timeout = 0.0;  // immediate timeout for testing
+
+  // Lock → submit → ack never arrives
+  sm.send_lock_goal();
+  sm.lock_result(true, 1);
+  sm.submit_trajectory();
+  EXPECT_TRUE(sm.opus_check_pending);
+
+  // Submission cleared opus_submission_needed in real code — simulate that
+  sm.opus_submission_needed = false;
+
+  // get_opus_action should detect the timeout and re-arm
+  auto action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::ACK_TIMEOUT);
+
+  // After timeout: all flags cleared, submission re-armed
+  EXPECT_FALSE(sm.opus_check_pending);
+  EXPECT_FALSE(sm.opus_granted);
+  EXPECT_FALSE(sm.opus_lock_pending);
+  EXPECT_TRUE(sm.opus_submission_needed);
+  EXPECT_EQ(sm.opus_grant_time, std::chrono::steady_clock::time_point{});
+}
+
+TEST(OpusStateMachine, AckTimeoutDoesNotFireBeforeThreshold) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::WAITING_FOR_OPUS;
+  sm.opus_submission_needed = true;
+  sm.opus_ack_timeout = 999.0;  // very long timeout
+
+  sm.send_lock_goal();
+  sm.lock_result(true, 1);
+  sm.submit_trajectory();
+
+  // With 999s timeout, should still be waiting (not timed out)
+  auto action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::WAIT);
+  EXPECT_TRUE(sm.opus_check_pending);  // unchanged
+}
+
+TEST(OpusStateMachine, AckTimeoutDoesNotFireWithoutGrantTime) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::WAITING_FOR_OPUS;
+  sm.opus_submission_needed = true;
+  sm.opus_ack_timeout = 0.0;
+
+  // Manually set check_pending without a grant (edge case)
+  sm.opus_check_pending = true;
+  sm.opus_grant_time = std::chrono::steady_clock::time_point{};  // epoch
+
+  // Should not fire timeout because grant_time is not set
+  auto action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::WAIT);
+  EXPECT_TRUE(sm.opus_check_pending);  // unchanged
+}
+
+
+// ============================================================================
+// Test: Ack Timeout Full Recovery Cycle
+// ============================================================================
+
+TEST(OpusStateMachine, AckTimeoutRecoveryCycle) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::WAITING_FOR_OPUS;
+  sm.opus_submission_needed = true;
+  sm.opus_ack_timeout = 0.0;  // immediate timeout
+
+  // Round 1: Lock → submit → ack lost
+  sm.send_lock_goal();
+  sm.lock_result(true, 1);
+  sm.submit_trajectory();
+  sm.opus_submission_needed = false;  // cleared by submission
+
+  // Timeout fires
+  auto action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::ACK_TIMEOUT);
+  EXPECT_TRUE(sm.opus_submission_needed);
+
+  // Round 2: Re-request lock → new grant → submit → ack arrives this time
+  action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::SEND_LOCK);
+  sm.send_lock_goal();
+  sm.lock_result(true, 2);
+  sm.submit_trajectory();
+
+  sm.opus_ack_timeout = 999.0;  // prevent immediate timeout on round 2
+  sm.trajectory_ack(true, 2);
+
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::TRAJECTORY_CONTROL);
+  EXPECT_FALSE(sm.opus_submission_needed);
+  EXPECT_FALSE(sm.opus_check_pending);
+  EXPECT_FALSE(sm.opus_granted);
+}
+
+
+// ============================================================================
+// Test: Lost-Lock Re-arms opus_submission_needed
+// ============================================================================
+
+TEST(OpusStateMachine, LostLockExplicitlyRearmsSubmissionNeeded) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::TRAJECTORY_CONTROL;
+  sm.drone_id = 1;
+
+  // Simulate: drone submitted, ack cleared submission_needed
+  sm.opus_granted = true;
+  sm.opus_check_pending = false;
+  sm.opus_submission_needed = false;  // was cleared by prior acceptance
+
+  // Coordinator revokes lock (timeout/another drone)
+  sm.status_callback(2);
+
+  // Must be re-armed so drone can re-request on next cycle
+  EXPECT_TRUE(sm.opus_submission_needed);
+  EXPECT_FALSE(sm.opus_granted);
+  EXPECT_EQ(sm.opus_grant_time, std::chrono::steady_clock::time_point{});
+}
+
+
+// ============================================================================
+// Test: OPUS Block Entered Even When submission_needed Is False
+// ============================================================================
+
+TEST(OpusStateMachine, BlockEnteredForTimeoutCheckEvenWhenNotSubmissionNeeded) {
+  OpusStateMachine sm;
+  sm.planner_state = PlanningStates::WAITING_FOR_OPUS;
+  sm.opus_ack_timeout = 0.0;
+
+  // submission_needed is false, but check_pending is true with a grant_time
+  sm.opus_submission_needed = false;
+  sm.opus_check_pending = true;
+  sm.opus_grant_time = std::chrono::steady_clock::now();
+
+  // Old code: get_opus_action would return NONE (gated by submission_needed)
+  // New code: enters block, detects timeout, re-arms submission
+  auto action = sm.get_opus_action();
+  EXPECT_EQ(action, OpusStateMachine::OpusAction::ACK_TIMEOUT);
+  EXPECT_TRUE(sm.opus_submission_needed);
 }

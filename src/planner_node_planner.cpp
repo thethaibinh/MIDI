@@ -126,7 +126,7 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   if (std::fabs(acceleration_world_frame.x) > _acc_planning_threshold || std::fabs(acceleration_world_frame.y) > _acc_planning_threshold)
     return;
 
-  if (velocity_body_frame.x < 0.0 || std::fabs(velocity_body_frame.y) > _vel_planning_threshold || std::fabs(velocity_body_frame.z) > _vel_planning_threshold)
+  if (std::fabs(velocity_body_frame.y) > _vel_planning_threshold || std::fabs(velocity_body_frame.z) > _vel_planning_threshold)
     return;
 
   geometry_msgs::msg::Vector3 velocity_camera_frame, acceleration_camera_frame;
@@ -225,19 +225,36 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
        state_now == PlanningStates::WAITING_FOR_OPUS ||
        state_now == PlanningStates::ALIGNING_HEADING ||
        state_now == PlanningStates::HOLDING_WAYPOINT);
-  if (opus_enabled_ && opus_submission_needed_ && opus_state_active) {
+  if (opus_enabled_ && opus_state_active) {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
 
-    // If waiting for TrajectoryCheck service response — just plan locally
-    if (opus_check_pending_) {
-      // Still waiting — plan locally below (don't return)
+    // Ack timeout: if we submitted but haven't received an ack within
+    // the timeout, the message was likely lost (zenoh drop). Clear
+    // check_pending and re-arm submission so the next cycle re-requests.
+    if (opus_check_pending_ &&
+        opus_grant_time_ != std::chrono::steady_clock::time_point{}) {
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - opus_grant_time_).count();
+      if (elapsed > opus_ack_timeout_) {
+        RCLCPP_WARN(this->get_logger(),
+            "OPUS: Ack timeout after %.1fs — clearing and re-requesting",
+            elapsed);
+        opus_check_pending_ = false;
+        opus_granted_ = false;
+        opus_lock_pending_ = false;
+        opus_submission_needed_ = true;
+        opus_grant_time_ = std::chrono::steady_clock::time_point{};
+        opus_pre_queue_.reset();
+      }
     }
-    // If lock granted and not waiting for check — ready to submit
-    else if (opus_granted_) {
+
+    if (!opus_submission_needed_) {
+      // Not in submission mode — plan locally below
+    } else if (opus_check_pending_) {
+      // Still waiting for ack — plan locally below (don't return)
+    } else if (opus_granted_) {
       opus_ready_to_submit = true;
-    }
-    // If lock not requested yet — send service request
-    else if (!opus_lock_pending_) {
+    } else if (!opus_lock_pending_) {
       opus_send_lock_request();
       // Plan locally below while waiting for grant via /opus/status
     }

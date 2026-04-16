@@ -30,8 +30,8 @@ depth_camera:
 # Planning parameters
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.9
-acc_planning_threshold: 0.1
-vel_planning_threshold: 0.6          # Lateral and vertical velocity threshold (m/s)
+acc_planning_threshold: 1.5
+vel_planning_threshold: 1.0          # Lateral and vertical velocity threshold (m/s)
 
 # Data freshness thresholds (seconds) - reject stale data for planning safety
 depth_age_threshold: 0.09            # Max age of depth image (wall clock) before rejection

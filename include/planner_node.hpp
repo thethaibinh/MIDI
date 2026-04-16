@@ -360,11 +360,13 @@ class PlannerNode : public rclcpp::Node {
     geometry_msgs::msg::Point world_position;
   };
   std::optional<OpusPreQueueEntry> opus_pre_queue_;
-  bool opus_submission_needed_ = false;  // Set at replan trigger, cleared on check response
+  std::atomic<bool> opus_submission_needed_{false};  // Set at replan trigger, cleared on check response. Atomic: read in img_callback without opus_mutex_.
 
   // OPUS timeout tracking (monotonic clock)
   std::chrono::steady_clock::time_point opus_grant_time_{};
   static constexpr double kOpusLocalReplanTimeout_ = 30.0;  // seconds before aborting local replanning
+  static constexpr double kOpusAckTimeout_ = 2.0;  // seconds before treating a missing ack as lost
+  double opus_ack_timeout_ = kOpusAckTimeout_;
 };
 
 #endif  // PLANNER_NODE_HPP

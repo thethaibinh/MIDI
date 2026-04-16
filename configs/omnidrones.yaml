@@ -34,8 +34,8 @@ depth_camera:
 # Planning parameters
 planning_cycle_time: 0.05           # Planning frequency (20 Hz)
 checking_time_ratio: 0.9
-acc_planning_threshold: 0.1
-vel_planning_threshold: 0.6          # New: Lateral and vertical velocity threshold (m/s)
+acc_planning_threshold: 1.5
+vel_planning_threshold: 1.0          # New: Lateral and vertical velocity threshold (m/s)
 sampled_trajectories_threshold: 20000    # Lowered for OmniDrones simulation
 checked_trajectories_threshold: 200    # Lowered - accept trajectory once we have 3 checked
 

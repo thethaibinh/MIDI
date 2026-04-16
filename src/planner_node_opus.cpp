@@ -55,9 +55,12 @@ void PlannerNode::opus_status_callback(
       msg->planning_drone_id);
     opus_granted_ = false;
     opus_check_pending_ = false;
-    // Do NOT clear opus_submission_needed_: the drone still needs to submit.
-    // Clearing it here caused stuck-in-WAITING_FOR_OPUS when
-    // had_reference_trajectory is false (first waypoint).
+    // Re-arm submission: the lock was lost, so any prior submission is void.
+    // Without this, if the drone submitted (clearing the flag) but the ack
+    // was lost, opus_submission_needed_ stays false and the replan trigger
+    // in update_reference_trajectory() can't re-arm it when
+    // had_reference_trajectory is false (first trajectory for a waypoint).
+    opus_submission_needed_ = true;
     opus_grant_time_ = std::chrono::steady_clock::time_point{};
     opus_pre_queue_.reset();
   }
@@ -137,11 +140,16 @@ void PlannerNode::opus_trajectory_ack_callback(
 
   // Now safe to lock trajectory_mutex_ without risk of deadlock.
   if (accepted) {
-    const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
-    steering_value = 0.0f;
-    _steered = false;
-    trajectory_queue_.push_back(accepted_trajectory);
-    pending_trajectory_start_time_override_ = submit_t;
+    {
+      const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+      steering_value = 0.0f;
+      _steered = false;
+      trajectory_queue_.push_back(accepted_trajectory);
+      pending_trajectory_start_time_override_ = submit_t;
+    }
+    // State transition OUTSIDE trajectory_mutex_: set_auto_pilot_state_forced
+    // locks trajectory_mutex_ internally for non-TRAJECTORY_CONTROL states,
+    // so calling it while holding that mutex would self-deadlock.
     if (_planner_state == PlanningStates::WAITING_FOR_OPUS) {
       set_auto_pilot_state_forced(PlanningStates::TRAJECTORY_CONTROL);
     }

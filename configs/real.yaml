@@ -27,8 +27,8 @@ depth_camera:
 # Planning parameters
 planning_cycle_time: 0.05
 checking_time_ratio: 0.6
-acc_planning_threshold: 0.1
-vel_planning_threshold: 0.6
+acc_planning_threshold: 1.5
+vel_planning_threshold: 1.0
 sampled_trajectories_threshold: 8000
 checked_trajectories_threshold: 100
 3d_planning: no

@@ -111,12 +111,17 @@ void PlannerNode::mission_callback(const ground_system_msgs::msg::StartSwarmMiss
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     RCLCPP_WARN(this->get_logger(), "[SIM] Starting navigation!");
     set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-    steering_value = 0.0f;
-    _steered = false;
-    trajectory_queue_.clear();
-    pending_trajectory_start_time_override_.reset();
-    reference_trajectory_ = ruckig::Trajectory<3>();
-    had_reference_trajectory = false;
+    // Trajectory fields protected by trajectory_mutex_ (img_callback on default
+    // group may still be mid-execution past the _planner_state gate).
+    {
+      const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+      steering_value = 0.0f;
+      _steered = false;
+      trajectory_queue_.clear();
+      pending_trajectory_start_time_override_.reset();
+      reference_trajectory_ = ruckig::Trajectory<3>();
+      had_reference_trajectory = false;
+    }
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
     RCLCPP_WARN(this->get_logger(), "[MAVROS] Initiating flight sequence...");
   }
@@ -144,12 +149,15 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
       const std::lock_guard<std::mutex> lock(state_mutex_);
       _home_in_world_frame = _state.pose.position;
     }
-    steering_value = 0.0f;
-    _steered = false;
-    trajectory_queue_.clear();
-    pending_trajectory_start_time_override_.reset();
-    reference_trajectory_ = ruckig::Trajectory<3>();
-    had_reference_trajectory = false;
+    {
+      const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+      steering_value = 0.0f;
+      _steered = false;
+      trajectory_queue_.clear();
+      pending_trajectory_start_time_override_.reset();
+      reference_trajectory_ = ruckig::Trajectory<3>();
+      had_reference_trajectory = false;
+    }
   } else if (_runtime_mode == RuntimeModes::MAVROS) {
     // Real FC mode: set flag to trigger GUIDED->ARM->TAKEOFF sequence in update_planner_state()
     // Do NOT immediately change state - let the FC sequence complete first
@@ -162,8 +170,17 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
 void PlannerNode::reset_planner() {
   RCLCPP_WARN(this->get_logger(), "Planner: Reset quadrotor!");
   set_auto_pilot_state_forced(PlanningStates::OFF);
-  steering_value = 0.0f;
-  _steered = false;
+  // Trajectory fields protected by trajectory_mutex_ (img_callback on default
+  // group may still be mid-execution past the _planner_state gate).
+  {
+    const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+    steering_value = 0.0f;
+    _steered = false;
+    trajectory_queue_.clear();
+    pending_trajectory_start_time_override_.reset();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  }
   _goal_set = false;
   mission_received_ = false;
   mission_uploaded_ = false;
@@ -174,10 +191,6 @@ void PlannerNode::reset_planner() {
   takeoff_requested_ = false;
   _reinitialise_requested = false;
   brake_mode_switch_sent_ = false;
-  trajectory_queue_.clear();
-  pending_trajectory_start_time_override_.reset();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
   // Reset fence breach recovery state
   _has_valid_setpoint = false;
   _last_valid_position = Eigen::Vector3d(0.0, 0.0, 0.0);
@@ -423,12 +436,15 @@ void PlannerNode::brake_callback(const std_msgs::msg::Empty::SharedPtr msg) {
   }
 
   // Clear trajectory state
-  trajectory_queue_.clear();
-  pending_trajectory_start_time_override_.reset();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+  {
+    const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+    trajectory_queue_.clear();
+    pending_trajectory_start_time_override_.reset();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  }
 
-  // Switch to BRAKE
+  // Switch to BRAKE (locks trajectory_mutex_ internally for non-TRAJECTORY_CONTROL)
   set_auto_pilot_state_forced(PlanningStates::BRAKE);
 }
 
@@ -453,10 +469,13 @@ void PlannerNode::land_swarm_callback(const std_msgs::msg::Empty::SharedPtr msg)
   }
 
   // Clear trajectory state
-  trajectory_queue_.clear();
-  pending_trajectory_start_time_override_.reset();
-  reference_trajectory_ = ruckig::Trajectory<3>();
-  had_reference_trajectory = false;
+  {
+    const std::lock_guard<std::mutex> tlock(trajectory_mutex_);
+    trajectory_queue_.clear();
+    pending_trajectory_start_time_override_.reset();
+    reference_trajectory_ = ruckig::Trajectory<3>();
+    had_reference_trajectory = false;
+  }
 
   if (_runtime_mode == RuntimeModes::OMNIDRONES) {
     // OmniDrones: switch to LAND immediately, tracker will descend to home altitude
