@@ -322,6 +322,15 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
       const std::lock_guard<std::mutex> olock(opus_mutex_);
       opus_submission_needed_ = true;
     }
+    // Clear stale pre-queue: the trajectory stored there was planned with an
+    // older transform/state. If planning keeps failing for multiple frames,
+    // submitting that stale entry on grant would use outdated world-frame
+    // coordinates. opus_abort_planning() already resets it on timeout; this
+    // covers the non-abort frames in between.
+    if (opus_enabled_) {
+      const std::lock_guard<std::mutex> olock(opus_mutex_);
+      opus_pre_queue_.reset();
+    }
     return;
   }
   // New traj generated — assign transforms (opt_traj is local, no lock needed)
