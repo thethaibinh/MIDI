@@ -643,6 +643,39 @@ TEST(PlannerStateMachine, HoldWaypointDefaultHoldTimeWhenMissing) {
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::GO_TO_GOAL);
 }
 
+// Regression: the HOLDING_WAYPOINT → ALIGNING_HEADING transition must NOT
+// touch any OPUS flag. The lock is requested only once the drone reaches
+// WAITING_FOR_OPUS (i.e. after heading alignment completes and a
+// goal-direction depth image is available for collision checking). Holding
+// the lock across yaw alignment would starve peers for seconds in exchange
+// for saving one grant round-trip.
+TEST(PlannerStateMachine, HoldWaypointToAligningHeadingLeavesOpusFlagsUntouched) {
+  PlannerStateMachine sm;
+  sm.setup_waypoint_mission();
+  sm.opus_enabled = true;
+  sm.set_state(PlanningStates::HOLDING_WAYPOINT);
+  sm.current_waypoint_index = 0;
+
+  // Sanity: all OPUS flags start clear.
+  ASSERT_FALSE(sm.opus_submission_needed);
+  ASSERT_FALSE(sm.opus_lock_pending);
+  ASSERT_FALSE(sm.opus_granted);
+  ASSERT_FALSE(sm.opus_check_pending);
+  const uint32_t seq_before = sm.opus_plan_sequence;
+
+  sm.time_in_current_state = 1.0;
+  EXPECT_TRUE(sm.check_holding_waypoint());
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
+
+  // No OPUS flag may be armed by the hold→align transition.
+  EXPECT_FALSE(sm.opus_submission_needed);
+  EXPECT_FALSE(sm.opus_lock_pending);
+  EXPECT_FALSE(sm.opus_granted);
+  EXPECT_FALSE(sm.opus_check_pending);
+  // And no plan_sequence bump (that happens on the real lock request only).
+  EXPECT_EQ(sm.opus_plan_sequence, seq_before);
+}
+
 
 // ============================================================================
 // GO_TO_GOAL → FINISHED

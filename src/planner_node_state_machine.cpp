@@ -236,12 +236,11 @@ void PlannerNode::update_planner_state() {
         pending_trajectory_start_time_override_.reset();
       }
       // OPUS: trigger immediate submission on the first planned trajectory.
-      // Do NOT reset opus_pre_queue_ here — it was already cleared on the
-      // HOLDING_WAYPOINT → ALIGNING_HEADING transition, and img_callback is
+      // Do NOT reset opus_pre_queue_ here — it was already cleared by
+      // opus_abort_planning("Waypoint reached, advancing") on the
+      // TRAJECTORY_CONTROL → HOLDING_WAYPOINT transition, and img_callback is
       // gated to TRAJECTORY_CONTROL/WAITING_FOR_OPUS so nothing repopulates
-      // it during alignment. Leaving it alone lets any future change that
-      // populates the pre-queue earlier carry the entry across so the
-      // fast-path can submit immediately on grant.
+      // it during HOLDING_WAYPOINT or ALIGNING_HEADING.
       if (opus_enabled_) {
         const std::lock_guard<std::mutex> olock(opus_mutex_);
         opus_submission_needed_ = true;
@@ -277,18 +276,13 @@ void PlannerNode::update_planner_state() {
     }
     if (time_in_state >= hold_time) {
       if (advance_waypoint()) {
-        // More waypoints → align heading then plan to next
+        // More waypoints → align heading then plan to next. The OPUS lock is
+        // only requested once we enter WAITING_FOR_OPUS: during ALIGNING_HEADING
+        // the drone has no goal-direction depth image, so any trajectory it
+        // could speculatively submit would not be collision-checked against
+        // the real obstacle set along the path. Holding the lock during
+        // yaw alignment would also starve peers that could plan meanwhile.
         set_auto_pilot_state_forced(PlanningStates::ALIGNING_HEADING);
-        // Pre-request OPUS lock during heading alignment so it's ready
-        // when alignment completes — saves one full round-trip delay.
-        if (opus_enabled_) {
-          const std::lock_guard<std::mutex> olock(opus_mutex_);
-          opus_submission_needed_ = true;
-          opus_pre_queue_.reset();
-          if (!opus_lock_pending_ && !opus_granted_ && !opus_check_pending_) {
-            opus_send_lock_request();
-          }
-        }
       } else {
         // Mission complete → go to goal (final position hold)
         set_auto_pilot_state_forced(PlanningStates::GO_TO_GOAL);

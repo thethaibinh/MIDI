@@ -203,12 +203,14 @@ struct OpusStateMachine {
       return false;
     }
 
-    // State gate: only active planning states
+    // State gate: only TRAJECTORY_CONTROL and WAITING_FOR_OPUS.
+    // A drone in HOLDING_WAYPOINT / ALIGNING_HEADING has no goal-direction
+    // depth image yet, so any submission would not be collision-checked
+    // against the real obstacle set. img_callback is gated on the same two
+    // states, so there is no consumer for opus_submission_needed_ there.
     auto s = planner_state.load();
     if (s != PlanningStates::TRAJECTORY_CONTROL &&
-        s != PlanningStates::WAITING_FOR_OPUS &&
-        s != PlanningStates::ALIGNING_HEADING &&
-        s != PlanningStates::HOLDING_WAYPOINT) {
+        s != PlanningStates::WAITING_FOR_OPUS) {
       return false;
     }
 
@@ -572,10 +574,17 @@ TEST(OpusStateMachine, ReplanTriggerDisabledWhenOpusOff) {
 
 
 // ============================================================================
-// Test: Replan Trigger State Gate — Only Active Planning States
+// Test: Replan Trigger State Gate — Only TRAJECTORY_CONTROL / WAITING_FOR_OPUS
 // ============================================================================
+//
+// Regression guard: the replan trigger must NOT re-arm opus_submission_needed_
+// during HOLDING_WAYPOINT or ALIGNING_HEADING. Those states have no
+// goal-direction depth image, so any trajectory the drone could speculatively
+// submit would not be collision-checked against the real obstacle set — and
+// holding the lock for ~1–3 s of yaw rotation starves peers. The lock is
+// requested only once the drone is in WAITING_FOR_OPUS.
 
-TEST(OpusStateMachine, ReplanTriggerAllowedInActivePlanningStates) {
+TEST(OpusStateMachine, ReplanTriggerAllowedOnlyInPlanningStates) {
   auto test = [](PlanningStates state) {
     OpusStateMachine sm;
     sm.planner_state = state;
@@ -588,8 +597,9 @@ TEST(OpusStateMachine, ReplanTriggerAllowedInActivePlanningStates) {
 
   EXPECT_TRUE(test(PlanningStates::TRAJECTORY_CONTROL));
   EXPECT_TRUE(test(PlanningStates::WAITING_FOR_OPUS));
-  EXPECT_TRUE(test(PlanningStates::ALIGNING_HEADING));
-  EXPECT_TRUE(test(PlanningStates::HOLDING_WAYPOINT));
+  // New invariant: no lock request during hold / alignment
+  EXPECT_FALSE(test(PlanningStates::ALIGNING_HEADING));
+  EXPECT_FALSE(test(PlanningStates::HOLDING_WAYPOINT));
 }
 
 TEST(OpusStateMachine, ReplanTriggerBlockedInTerminalStates) {

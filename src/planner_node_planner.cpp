@@ -203,16 +203,16 @@ void PlannerNode::img_callback(const sm::Image::SharedPtr depth_msg) {
   // OPUS coordination: manage submission protocol (non-blocking).
   // We always plan locally (below) and only engage the OPUS protocol
   // when opus_submission_needed_ is set by update_reference_trajectory().
-  // Gate by planner state: drones in GO_TO_GOAL / FINISHED / BRAKE / LAND
-  // must not request new locks — their CANCEL already removed them from
-  // the coordinator's trajectory database.
+  // Gate by planner state: only TRAJECTORY_CONTROL and WAITING_FOR_OPUS
+  // are reachable here (img_callback returns early at the top for every
+  // other state). HOLDING_WAYPOINT and ALIGNING_HEADING must not request
+  // the lock anyway — without a goal-direction depth image no trajectory
+  // produced there would be collision-checked against the real path.
   bool opus_ready_to_submit = false;
   const auto state_now = _planner_state.load();
   const bool opus_state_active =
       (state_now == PlanningStates::TRAJECTORY_CONTROL ||
-       state_now == PlanningStates::WAITING_FOR_OPUS ||
-       state_now == PlanningStates::ALIGNING_HEADING ||
-       state_now == PlanningStates::HOLDING_WAYPOINT);
+       state_now == PlanningStates::WAITING_FOR_OPUS);
   if (opus_enabled_ && opus_state_active) {
     const std::lock_guard<std::mutex> lock(opus_mutex_);
 
