@@ -25,7 +25,31 @@ void PlannerNode::update_planner_state() {
     // Log the heading that will be used
     RCLCPP_INFO_ONCE(this->get_logger(), "Using goal heading: %.1f deg (%.2f rad)",
                      _goal_heading * 180.0 / M_PI, _goal_heading);
-    
+
+    // Release pending latches either when the FC has already reached the
+    // requested state (confirmed via /mavros/state) or after a 2s timeout
+    // so we can retry if the request was silently dropped. This prevents
+    // spamming the FC command queue with duplicate requests while the
+    // /mavros/state topic lags behind the service response by ~100 ms.
+    const auto now = std::chrono::steady_clock::now();
+    constexpr auto kRetryCooldown = std::chrono::seconds(2);
+    if (mode_switch_pending_ &&
+        (fc_status.mode == "GUIDED" ||
+         now - mode_switch_sent_time_ > kRetryCooldown)) {
+      mode_switch_pending_ = false;
+    }
+    if (arming_pending_ &&
+        (fc_status.armed ||
+         now - arming_sent_time_ > kRetryCooldown)) {
+      arming_pending_ = false;
+    }
+    // takeoff_pending_ is released by the service-response callback on
+    // success (which also sets TAKING_OFF); here we only need the timeout
+    // fallback in case the response is lost.
+    if (takeoff_pending_ && now - takeoff_sent_time_ > kRetryCooldown) {
+      takeoff_pending_ = false;
+    }
+
     // Step 1: Switch to GUIDED mode if not already
     if (fc_status.mode != "GUIDED" && !mode_switch_pending_) {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -35,19 +59,24 @@ void PlannerNode::update_planner_state() {
         auto request = std::make_shared<mavros_msgs::srv::SetMode::Request>();
         request->custom_mode = "GUIDED";
         mode_switch_pending_ = true;
-        
+        mode_switch_sent_time_ = now;
+
         mode_srv->async_send_request(request,
           [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
-            mode_switch_pending_ = false;
+            // Do NOT clear mode_switch_pending_ here — let observed
+            // fc_status.mode=="GUIDED" or the retry-cooldown timeout
+            // clear it, to avoid re-sending before /mavros/state catches up.
             try {
               auto response = future.get();
               if (response->mode_sent) {
                 RCLCPP_INFO(this->get_logger(), "GUIDED mode request sent");
               } else {
                 RCLCPP_ERROR(this->get_logger(), "Failed to send GUIDED mode request");
+                mode_switch_pending_ = false;  // rejected → retry immediately
               }
             } catch (const std::exception& e) {
               RCLCPP_ERROR(this->get_logger(), "Mode switch service failed: %s", e.what());
+              mode_switch_pending_ = false;
             }
           });
       }
@@ -60,19 +89,25 @@ void PlannerNode::update_planner_state() {
         auto request = std::make_shared<mavros_msgs::srv::CommandBool::Request>();
         request->value = true;
         arming_pending_ = true;
-        
+        arming_sent_time_ = now;
+
         arming_srv->async_send_request(request,
           [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
-            arming_pending_ = false;
+            // Do NOT clear arming_pending_ here — observed fc_status.armed
+            // or retry-cooldown timeout clears it. ArduCopter silently
+            // ignores arm-while-armed, so we don't want to re-send every
+            // planning cycle while /mavros/state lags by ~100 ms.
             try {
               auto response = future.get();
               if (response->success) {
                 RCLCPP_INFO(this->get_logger(), "Arming command accepted");
               } else {
                 RCLCPP_ERROR(this->get_logger(), "Arming command rejected");
+                arming_pending_ = false;  // rejected → retry immediately
               }
             } catch (const std::exception& e) {
               RCLCPP_ERROR(this->get_logger(), "Arming service failed: %s", e.what());
+              arming_pending_ = false;
             }
           });
       }
@@ -86,20 +121,24 @@ void PlannerNode::update_planner_state() {
         // Use goal altitude if set, otherwise use _goal_up_coordinate (from takeoff command)
         request->altitude = _goal_set ? _goal_in_world_frame.z : _goal_up_coordinate;
         takeoff_pending_ = true;
-        
+        takeoff_sent_time_ = now;
+
         takeoff_srv->async_send_request(request,
           [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
-            takeoff_pending_ = false;
             try {
               auto response = future.get();
               if (response->success) {
                 RCLCPP_WARN(this->get_logger(), "Takeoff command accepted!");
                 set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+                // Leave takeoff_pending_ true — we've already moved out of
+                // OFF, so the startup block won't re-enter anyway.
               } else {
                 RCLCPP_ERROR(this->get_logger(), "Takeoff command rejected by FCU");
+                takeoff_pending_ = false;  // rejected → retry immediately
               }
             } catch (const std::exception& e) {
               RCLCPP_ERROR(this->get_logger(), "Takeoff service failed: %s", e.what());
+              takeoff_pending_ = false;
             }
           });
       }

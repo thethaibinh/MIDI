@@ -163,6 +163,16 @@ class PlannerNode : public rclcpp::Node {
   std::atomic<bool> arming_pending_{false};
   std::atomic<bool> takeoff_pending_{false};
   std::atomic<bool> land_pending_{false};
+  // Timestamps at which the corresponding request was dispatched. Used to
+  // implement a retry cooldown so we don't spam the FC while /mavros/state
+  // catches up. Pending flag is cleared by observed-state transition or by
+  // timeout (whichever comes first). Protected by service-response thread
+  // writes + update_planner_state reads; single-writer per flag, so atomic
+  // time_point is unnecessary — the pending atomic bool gates access.
+  std::chrono::steady_clock::time_point mode_switch_sent_time_{};
+  std::chrono::steady_clock::time_point arming_sent_time_{};
+  std::chrono::steady_clock::time_point takeoff_sent_time_{};
+  std::chrono::steady_clock::time_point land_sent_time_{};
   std::atomic<bool> takeoff_requested_{false};  // Triggers GUIDED->ARM->TAKEOFF without goal
   bool _reinitialise_requested{false};  // True after reinitialise_callback, cleared on auto-reset
   std::atomic<bool> brake_mode_switch_sent_{false};  // MAVROS: BRAKE mode switch sent once
