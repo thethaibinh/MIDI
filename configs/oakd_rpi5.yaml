@@ -54,12 +54,12 @@ minimum_clear_distance: 0.6         # Min clearance from obstacles (m)
 
 # Fence/world limits (keep drone within safe bounds)
 fence_limits:
-  min_x: -3.5
-  max_x: 3.5  # East is positive X in ENU
-  min_y: -3.6  
-  max_y: 3.6  # North is positive Y in ENU
+  min_x: -3.0
+  max_x: 3.0  # East is positive X in ENU
+  min_y: -3.0  
+  max_y: 3.5  # North is positive Y in ENU
   min_z: 0.4
-  max_z: 2.5  # Up is positive Z in ENU
+  max_z: 2.0  # Up is positive Z in ENU
 
 # SSTO trajectory generation parameters
 # Sampling parameters

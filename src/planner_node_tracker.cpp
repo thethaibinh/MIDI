@@ -274,8 +274,10 @@ void PlannerNode::public_ref_pos(const TrajectoryPoint& reference_point) {
       msg.acceleration_or_force.y = 0.0;
       msg.acceleration_or_force.z = 0.0;
     } else if (_setpoint_type == SetpointTypes::FULL_STATE) {
-      // Use all fields - position, velocity, acceleration, yaw
-      // msg.type_mask = 2048;  // Only ignore yaw_rate
+      // Use pos + vel + accel + yaw; ignore yaw_rate (bit 11 = 2048).
+      // Leaving type_mask=0 makes ArduPilot treat yaw_rate=0 as "hold yaw"
+      // and ignore the yaw angle, so the drone never rotates.
+      msg.type_mask = 2048;
       msg.velocity.x = reference_point.velocity(0);
       msg.velocity.y = reference_point.velocity(1);
       msg.velocity.z = reference_point.velocity(2);
