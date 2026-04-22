@@ -163,6 +163,13 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
     // Do NOT immediately change state - let the FC sequence complete first
     RCLCPP_WARN(this->get_logger(), "[MAVROS] Takeoff command received, initiating takeoff to %.2f m...",
                 msg->altitude);
+    {
+      // Snapshot current pose as takeoff origin — used by the observed-
+      // altitude fallback in update_planner_state() to detect a real
+      // takeoff when COMMAND_ACKs are lost on the multi-GCS MAVLink link.
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      _home_in_world_frame = _state.pose.position;
+    }
     takeoff_requested_ = true;
   }
 }

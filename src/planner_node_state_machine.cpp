@@ -43,11 +43,26 @@ void PlannerNode::update_planner_state() {
          now - arming_sent_time_ > kRetryCooldown)) {
       arming_pending_ = false;
     }
-    // takeoff_pending_ is released by the service-response callback on
-    // success (which also sets TAKING_OFF); here we only need the timeout
-    // fallback in case the response is lost.
     if (takeoff_pending_ && now - takeoff_sent_time_ > kRetryCooldown) {
       takeoff_pending_ = false;
+    }
+
+    // Observed-state fallback: on a multi-GCS MAVLink link (MAVROS + separate
+    // GCS + MAVProxy-VICON), COMMAND_ACKs can be dropped or misrouted. MAVROS
+    // then reports success=false 5s later even though the FC actually armed /
+    // mode-switched / took off. Trust /mavros/state over service responses:
+    // if we observe the FC armed in GUIDED with altitude climbing, treat
+    // takeoff as succeeded regardless of what the service call returned.
+    if (fc_status.mode == "GUIDED" && fc_status.armed) {
+      const double home_z = _home_in_world_frame.z;
+      const double climb_threshold = 0.15;  // m above home
+      if (_state.pose.position.z > home_z + climb_threshold) {
+        RCLCPP_WARN(this->get_logger(),
+          "[MAVROS] Observed takeoff in progress (armed+GUIDED, z=%.2f > home+%.2f), transitioning to TAKING_OFF",
+          _state.pose.position.z, climb_threshold);
+        set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
+        return;
+      }
     }
 
     // Step 1: Switch to GUIDED mode if not already
@@ -61,28 +76,32 @@ void PlannerNode::update_planner_state() {
         mode_switch_pending_ = true;
         mode_switch_sent_time_ = now;
 
+        // On a multi-GCS MAVLink link COMMAND_ACKs are unreliable, so we do
+        // NOT clear mode_switch_pending_ from the service response. The
+        // pending flag is cleared only by: observing fc_status.mode=="GUIDED"
+        // (authoritative), or the 2s retry cooldown (safety net). Log the
+        // response for diagnostics only — do not treat success=false as
+        // authoritative rejection.
         mode_srv->async_send_request(request,
           [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
-            // Do NOT clear mode_switch_pending_ here — let observed
-            // fc_status.mode=="GUIDED" or the retry-cooldown timeout
-            // clear it, to avoid re-sending before /mavros/state catches up.
             try {
               auto response = future.get();
               if (response->mode_sent) {
                 RCLCPP_INFO(this->get_logger(), "GUIDED mode request sent");
               } else {
-                RCLCPP_ERROR(this->get_logger(), "Failed to send GUIDED mode request");
-                mode_switch_pending_ = false;  // rejected → retry immediately
+                RCLCPP_WARN(this->get_logger(),
+                  "GUIDED mode service returned mode_sent=false "
+                  "(likely ACK lost on multi-GCS link; will retry on cooldown)");
               }
             } catch (const std::exception& e) {
-              RCLCPP_ERROR(this->get_logger(), "Mode switch service failed: %s", e.what());
-              mode_switch_pending_ = false;
+              RCLCPP_WARN(this->get_logger(),
+                "Mode switch service exception: %s (will retry on cooldown)", e.what());
             }
           });
       }
       return;  // Wait for mode switch
     }
-    
+
     // Step 2: Arm if in GUIDED but not armed
     if (fc_status.mode == "GUIDED" && !fc_status.armed && !arming_pending_) {
       if (arming_srv->service_is_ready()) {
@@ -91,29 +110,30 @@ void PlannerNode::update_planner_state() {
         arming_pending_ = true;
         arming_sent_time_ = now;
 
+        // Same reasoning as GUIDED: pending_ only cleared by observed
+        // fc_status.armed==true or 2s cooldown. Service success=false is
+        // NOT treated as rejection — the command may have succeeded with
+        // the ACK lost in MAVLink routing.
         arming_srv->async_send_request(request,
           [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
-            // Do NOT clear arming_pending_ here — observed fc_status.armed
-            // or retry-cooldown timeout clears it. ArduCopter silently
-            // ignores arm-while-armed, so we don't want to re-send every
-            // planning cycle while /mavros/state lags by ~100 ms.
             try {
               auto response = future.get();
               if (response->success) {
                 RCLCPP_INFO(this->get_logger(), "Arming command accepted");
               } else {
-                RCLCPP_ERROR(this->get_logger(), "Arming command rejected");
-                arming_pending_ = false;  // rejected → retry immediately
+                RCLCPP_WARN(this->get_logger(),
+                  "Arming service returned success=false "
+                  "(likely ACK lost on multi-GCS link; will retry on cooldown)");
               }
             } catch (const std::exception& e) {
-              RCLCPP_ERROR(this->get_logger(), "Arming service failed: %s", e.what());
-              arming_pending_ = false;
+              RCLCPP_WARN(this->get_logger(),
+                "Arming service exception: %s (will retry on cooldown)", e.what());
             }
           });
       }
       return;  // Wait for arming
     }
-    
+
     // Step 3: Takeoff if armed
     if (fc_status.mode == "GUIDED" && fc_status.armed && !takeoff_pending_) {
       if (takeoff_srv->service_is_ready()) {
@@ -130,15 +150,18 @@ void PlannerNode::update_planner_state() {
               if (response->success) {
                 RCLCPP_WARN(this->get_logger(), "Takeoff command accepted!");
                 set_auto_pilot_state_forced(PlanningStates::TAKING_OFF);
-                // Leave takeoff_pending_ true — we've already moved out of
-                // OFF, so the startup block won't re-enter anyway.
               } else {
-                RCLCPP_ERROR(this->get_logger(), "Takeoff command rejected by FCU");
-                takeoff_pending_ = false;  // rejected → retry immediately
+                // Do NOT transition here — the observed-altitude fallback at
+                // the top of this block will catch a real takeoff. If the FC
+                // genuinely rejected (pre-arm fault, etc.) the cooldown will
+                // retry and the drone will stay grounded.
+                RCLCPP_WARN(this->get_logger(),
+                  "Takeoff service returned success=false "
+                  "(may be ACK lost; observed-altitude fallback will confirm)");
               }
             } catch (const std::exception& e) {
-              RCLCPP_ERROR(this->get_logger(), "Takeoff service failed: %s", e.what());
-              takeoff_pending_ = false;
+              RCLCPP_WARN(this->get_logger(),
+                "Takeoff service exception: %s (will retry on cooldown)", e.what());
             }
           });
       }
