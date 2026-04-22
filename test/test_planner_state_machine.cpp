@@ -116,9 +116,12 @@ struct PlannerStateMachine {
     time_in_current_state = 0.0;
   }
 
-  /// TAKING_OFF → ALIGNING_HEADING when altitude reached
+  /// TAKING_OFF → ALIGNING_HEADING when altitude reached AND Start Swarm
+  /// has been issued (mission_received=true). Mission upload alone must not
+  /// auto-progress the state machine past TAKING_OFF.
   void check_takeoff_complete() {
     if (planner_state != PlanningStates::TAKING_OFF) return;
+    if (!mission_received) return;
     double takeoff_complete_altitude = takeoff_altitude - 0.1;
     if (position.z() >= takeoff_complete_altitude) {
       if (waypoint_mission_active && current_waypoint_index < waypoint_headings.size()) {
@@ -376,6 +379,7 @@ TEST(PlannerStateMachine, TakeoffToAligningWhenAltitudeReached) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
   sm.takeoff_altitude = 1.5;
+  sm.mission_received = true;  // Start Swarm issued
   sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.position = Eigen::Vector3d(0.0, 0.0, 0.5);  // below threshold
 
@@ -392,9 +396,33 @@ TEST(PlannerStateMachine, TakeoffToAligningAboveThreshold) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
   sm.takeoff_altitude = 1.5;
+  sm.mission_received = true;
   sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.position = Eigen::Vector3d(0.0, 0.0, 2.0);  // overshoot
 
+  sm.check_takeoff_complete();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
+}
+
+// Regression: mission upload alone (no Start Swarm) must not auto-progress
+// the drone past TAKING_OFF. A mission_upload_callback flips _goal_set and
+// computes _goal_in_world_frame, but mission_received_ only goes true when
+// the operator clicks Start Swarm. Without that gate, the drone autonomously
+// takes off and flies to WP1 purely on mission upload.
+TEST(PlannerStateMachine, TakeoffBlockedUntilStartSwarm) {
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TAKING_OFF);
+  sm.takeoff_altitude = 1.0;
+  sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
+  sm.position = Eigen::Vector3d(0.0, 0.0, 1.0);  // altitude reached
+
+  // Mission uploaded but Start Swarm not yet clicked → stay in TAKING_OFF.
+  sm.mission_received = false;
+  sm.check_takeoff_complete();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::TAKING_OFF);
+
+  // Operator clicks Start Swarm → transition fires.
+  sm.mission_received = true;
   sm.check_takeoff_complete();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
 }
@@ -419,6 +447,9 @@ TEST(PlannerStateMachine, TakeoffThresholdNotRaisedByLaterMissionUpload) {
   sm.goal_up_coordinate = 1.5;
   if (sm.takeoff_altitude == 0.0) sm.takeoff_altitude = 1.5;
 
+  // Operator clicks Start Swarm.
+  sm.mission_received = true;
+
   // Threshold should still be (1.0 - 0.1) = 0.9, drone at 1.0 → transitions.
   sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.check_takeoff_complete();
@@ -429,6 +460,7 @@ TEST(PlannerStateMachine, TakeoffUsesWaypointHeadingWhenActive) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
   sm.setup_waypoint_mission();
+  sm.mission_received = true;
   sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);
 
   sm.check_takeoff_complete();
@@ -440,6 +472,7 @@ TEST(PlannerStateMachine, TakeoffComputesHeadingWhenNoWaypointMission) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
   sm.takeoff_altitude = 1.5;
+  sm.mission_received = true;
   sm.goal = Eigen::Vector3d(0.0, 5.0, 1.5);  // due north
   sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);
 
@@ -452,6 +485,7 @@ TEST(PlannerStateMachine, TakeoffIgnoredFromWrongState) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
   sm.takeoff_altitude = 1.5;
+  sm.mission_received = true;
   sm.position = Eigen::Vector3d(0.0, 0.0, 2.0);
 
   sm.check_takeoff_complete();
@@ -1119,8 +1153,9 @@ TEST(PlannerStateMachine, FullMissionCycleOmniDrones) {
   sm.home = Eigen::Vector3d(0.0, 0.0, 0.0);
   sm.initial_heading = 0.0;
 
-  // 1. Takeoff
+  // 1. Takeoff (Start Swarm issued → mission_received gate satisfied)
   sm.set_state(PlanningStates::TAKING_OFF);
+  sm.mission_received = true;
   sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);
   sm.check_takeoff_complete();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);

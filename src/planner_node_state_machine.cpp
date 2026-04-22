@@ -12,9 +12,12 @@ void PlannerNode::update_planner_state() {
   }
 
   // For MAVROS mode: Handle FC startup sequence (GUIDED -> ARM -> TAKEOFF)
-  // Trigger on either _goal_set (mission) or takeoff_requested_ (takeoff-only)
-  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF && 
-      (_goal_set || takeoff_requested_)) {
+  // Trigger on either mission_received_ (Start Swarm clicked) or
+  // takeoff_requested_ (explicit /takeoff). NOT on _goal_set alone — that flag
+  // flips as soon as mission_upload_callback runs, which would auto-takeoff on
+  // mission upload instead of waiting for the operator's Start Swarm button.
+  if (_runtime_mode == RuntimeModes::MAVROS && _planner_state == PlanningStates::OFF &&
+      (mission_received_ || takeoff_requested_)) {
     
     // Note: _goal_heading is now computed in the goal callbacks (mission_upload_callback)
     // at the same time as goal position, using the same state snapshot.
@@ -238,8 +241,11 @@ void PlannerNode::update_planner_state() {
   // _goal_up_coordinate: a mission upload with a higher WP[0].up would override
   // _goal_up_coordinate and push the threshold above the FC's actual hover
   // altitude, stranding the drone in TAKING_OFF.
+  // Also gate on mission_received_ so the drone does not auto-proceed out of
+  // TAKING_OFF from a mission upload alone — it must wait for Start Swarm.
   double takeoff_complete_altitude = _takeoff_altitude - 0.1;
-  if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
+  if (_state.pose.position.z >= takeoff_complete_altitude &&
+      _planner_state == PlanningStates::TAKING_OFF && mission_received_) {
     RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), aligning heading to goal",
                 _state.pose.position.z, takeoff_complete_altitude);
     if (_waypoint_mission_active && _current_waypoint_index < _waypoint_headings.size()) {
