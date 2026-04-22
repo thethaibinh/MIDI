@@ -49,6 +49,11 @@ struct PlannerStateMachine {
   Eigen::Vector3d goal{0.0, 0.0, 0.0};
   double goal_heading{0.0};
   double goal_up_coordinate{0.0};
+  // Altitude actually commanded to the FC (MAVROS) or airborne spawn altitude
+  // (OmniDrones). Used as the TAKING_OFF → ALIGNING_HEADING threshold — kept
+  // separate from goal_up_coordinate so a mission upload with a higher WP[0].up
+  // cannot push the threshold above the FC's actual hover altitude.
+  double takeoff_altitude{0.0};
   bool goal_set{false};
 
   // --- Home / reinitialise ---
@@ -114,7 +119,7 @@ struct PlannerStateMachine {
   /// TAKING_OFF → ALIGNING_HEADING when altitude reached
   void check_takeoff_complete() {
     if (planner_state != PlanningStates::TAKING_OFF) return;
-    double takeoff_complete_altitude = goal_up_coordinate - 0.1;
+    double takeoff_complete_altitude = takeoff_altitude - 0.1;
     if (position.z() >= takeoff_complete_altitude) {
       if (waypoint_mission_active && current_waypoint_index < waypoint_headings.size()) {
         goal_heading = waypoint_headings[current_waypoint_index];
@@ -316,6 +321,7 @@ struct PlannerStateMachine {
     had_reference_trajectory = false;
     has_valid_setpoint = false;
     goal_up_coordinate = 0.0;
+    takeoff_altitude = 0.0;
     // Waypoint state
     world_waypoints.clear();
     waypoint_headings.clear();
@@ -354,6 +360,9 @@ struct PlannerStateMachine {
     goal_heading = waypoint_headings[0];
     goal_set = true;
     goal_up_coordinate = 1.5;
+    // Mirror first-setter-wins in mission_upload_callback: OmniDrones path
+    // with no prior takeoff_callback → mission altitude becomes the threshold.
+    if (takeoff_altitude == 0.0) takeoff_altitude = 1.5;
     home = Eigen::Vector3d(0.0, 0.0, 0.0);
   }
 };
@@ -366,14 +375,14 @@ struct PlannerStateMachine {
 TEST(PlannerStateMachine, TakeoffToAligningWhenAltitudeReached) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
-  sm.goal_up_coordinate = 1.5;
+  sm.takeoff_altitude = 1.5;
   sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.position = Eigen::Vector3d(0.0, 0.0, 0.5);  // below threshold
 
   sm.check_takeoff_complete();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::TAKING_OFF);
 
-  // Reach threshold (goal_up - 0.1 = 1.4)
+  // Reach threshold (takeoff_altitude - 0.1 = 1.4)
   sm.position.z() = 1.4;
   sm.check_takeoff_complete();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
@@ -382,10 +391,36 @@ TEST(PlannerStateMachine, TakeoffToAligningWhenAltitudeReached) {
 TEST(PlannerStateMachine, TakeoffToAligningAboveThreshold) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
-  sm.goal_up_coordinate = 1.5;
+  sm.takeoff_altitude = 1.5;
   sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.position = Eigen::Vector3d(0.0, 0.0, 2.0);  // overshoot
 
+  sm.check_takeoff_complete();
+  EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
+}
+
+// Regression: MAVROS user sends /takeoff altitude=1.0, FC reaches 1.0 m, then
+// uploads a mission with WP[0].up=1.5. Previously the mission override raised
+// the transition threshold to 1.4 m and the drone stayed stuck in TAKING_OFF
+// because the FC wasn't flying any higher. Now the takeoff_altitude is
+// first-setter-wins → transition still fires at (1.0 - 0.1) = 0.9 m.
+TEST(PlannerStateMachine, TakeoffThresholdNotRaisedByLaterMissionUpload) {
+  PlannerStateMachine sm;
+  sm.set_state(PlanningStates::TAKING_OFF);
+  // Simulate takeoff_callback setting both fields from the 1.0 m takeoff cmd.
+  sm.takeoff_altitude = 1.0;
+  sm.goal_up_coordinate = 1.0;
+
+  // FC climbs to ~1.0 m and hovers.
+  sm.position = Eigen::Vector3d(0.0, 0.0, 1.0);
+
+  // Mission upload mirrors planner_node_mission.cpp: override goal_up_coordinate
+  // for CommandTOL fallback purposes, but keep takeoff_altitude (first-setter-wins).
+  sm.goal_up_coordinate = 1.5;
+  if (sm.takeoff_altitude == 0.0) sm.takeoff_altitude = 1.5;
+
+  // Threshold should still be (1.0 - 0.1) = 0.9, drone at 1.0 → transitions.
+  sm.goal = Eigen::Vector3d(5.0, 0.0, 1.5);
   sm.check_takeoff_complete();
   EXPECT_EQ(sm.planner_state.load(), PlanningStates::ALIGNING_HEADING);
 }
@@ -404,7 +439,7 @@ TEST(PlannerStateMachine, TakeoffUsesWaypointHeadingWhenActive) {
 TEST(PlannerStateMachine, TakeoffComputesHeadingWhenNoWaypointMission) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TAKING_OFF);
-  sm.goal_up_coordinate = 1.5;
+  sm.takeoff_altitude = 1.5;
   sm.goal = Eigen::Vector3d(0.0, 5.0, 1.5);  // due north
   sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);
 
@@ -416,7 +451,7 @@ TEST(PlannerStateMachine, TakeoffComputesHeadingWhenNoWaypointMission) {
 TEST(PlannerStateMachine, TakeoffIgnoredFromWrongState) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::TRAJECTORY_CONTROL);
-  sm.goal_up_coordinate = 1.5;
+  sm.takeoff_altitude = 1.5;
   sm.position = Eigen::Vector3d(0.0, 0.0, 2.0);
 
   sm.check_takeoff_complete();
@@ -773,7 +808,7 @@ TEST(PlannerStateMachine, BrakeIsDeadEnd) {
   PlannerStateMachine sm;
   sm.set_state(PlanningStates::BRAKE);
   sm.goal_set = true;
-  sm.goal_up_coordinate = 1.5;
+  sm.takeoff_altitude = 1.5;
   sm.position = Eigen::Vector3d(0.0, 0.0, 1.5);
   sm.goal = sm.position;
   sm.had_reference_trajectory = true;
@@ -1012,6 +1047,7 @@ TEST(PlannerStateMachine, ResetClearsAllFlags) {
   sm.had_reference_trajectory = true;
   sm.has_valid_setpoint = true;
   sm.goal_up_coordinate = 5.0;
+  sm.takeoff_altitude = 5.0;
   sm.setup_waypoint_mission(3);
 
   sm.reset_planner();
@@ -1032,6 +1068,7 @@ TEST(PlannerStateMachine, ResetClearsAllFlags) {
   EXPECT_FALSE(sm.had_reference_trajectory);
   EXPECT_FALSE(sm.has_valid_setpoint);
   EXPECT_DOUBLE_EQ(sm.goal_up_coordinate, 0.0);
+  EXPECT_DOUBLE_EQ(sm.takeoff_altitude, 0.0);
   EXPECT_TRUE(sm.world_waypoints.empty());
   EXPECT_TRUE(sm.waypoint_headings.empty());
   EXPECT_TRUE(sm.waypoint_hold_times.empty());

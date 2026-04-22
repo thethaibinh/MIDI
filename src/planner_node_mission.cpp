@@ -58,6 +58,14 @@ void PlannerNode::mission_upload_callback(const ground_system_msgs::msg::SwarmMi
   // For OmniDrones: drones are already airborne, so this must match the mission altitude
   //   to allow the TAKING_OFF → ALIGNING_HEADING transition.
   _goal_up_coordinate = msg->waypoints[0].up;
+  // First-setter wins for the TAKING_OFF threshold: if takeoff_callback already
+  // set _takeoff_altitude to the altitude actually commanded to the FC, do NOT
+  // raise it here — the FC is only flying to that altitude, and raising the
+  // threshold would strand the drone in TAKING_OFF. OmniDrones (no prior
+  // takeoff_callback) still picks up the mission altitude here.
+  if (_takeoff_altitude == 0.0) {
+    _takeoff_altitude = msg->waypoints[0].up;
+  }
 
   // Convert FLU waypoints to world frame ONCE using initial yaw.
   convert_waypoints_to_world(initial_yaw);
@@ -137,6 +145,9 @@ void PlannerNode::takeoff_callback(const ground_system_msgs::msg::Takeoff::Share
   
   // Set takeoff altitude in goal_up_coordinate (used by update_planner_state for takeoff)
   _goal_up_coordinate = msg->altitude;
+  // _takeoff_altitude is what the FC is actually flying to — this is the
+  // threshold the TAKING_OFF → ALIGNING_HEADING transition checks against.
+  _takeoff_altitude = msg->altitude;
   
   // NOTE: For takeoff-only, we do NOT set _goal_set or mission_received_
   // This allows the planner to just takeoff and hover
@@ -197,6 +208,7 @@ void PlannerNode::reset_planner() {
   _last_valid_heading = 0.0;
   // Reset takeoff altitude
   _goal_up_coordinate = 0.0;
+  _takeoff_altitude = 0.0;
   // Reset waypoint mission state
   _waypoint_list.clear();
   _world_waypoints.clear();

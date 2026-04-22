@@ -273,6 +273,12 @@ class PlannerNode : public rclcpp::Node {
   std::vector<double> _depth_uncertainty_coeffs;
   double _depth_upper_bound, _depth_lower_bound, _checking_time_ratio, _depth_sampling_margin;
   double _go_to_goal_threshold, _goal_up_coordinate;
+  // Altitude actually commanded to the FC (MAVROS takeoff) or the airborne
+  // spawn altitude (OmniDrones). Used only as the TAKING_OFF → ALIGNING_HEADING
+  // threshold — decoupled from _goal_up_coordinate so that a mission upload
+  // with a higher WP[0].up cannot raise the threshold above what the FC is
+  // actually flying to, which would strand the drone in TAKING_OFF.
+  double _takeoff_altitude = 0.0;
   double _flightmare_fov, _depth_scale, _real_focal_length, _real_cx, _real_cy, _decimation_factor;
   geometry_msgs::msg::Point _goal_in_world_frame, _home_in_world_frame;
   double _goal_heading;  // Heading to goal (computed once when goal is set)

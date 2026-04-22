@@ -232,9 +232,13 @@ void PlannerNode::update_planner_state() {
       ? (drone_xy - goal_xy).dot(seg_dir) > 0.0
       : (distance_to_goal < _go_to_goal_threshold);
 
-  // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached
-  // Use _goal_up_coordinate (from takeoff command) for transition, not _goal_in_world_frame.z
-  double takeoff_complete_altitude = _goal_up_coordinate - 0.1;
+  // Transition from TAKING_OFF to ALIGNING_HEADING when takeoff altitude reached.
+  // Use _takeoff_altitude (what the FC was actually commanded to fly to, set by
+  // takeoff_callback for MAVROS or first mission upload for OmniDrones), NOT
+  // _goal_up_coordinate: a mission upload with a higher WP[0].up would override
+  // _goal_up_coordinate and push the threshold above the FC's actual hover
+  // altitude, stranding the drone in TAKING_OFF.
+  double takeoff_complete_altitude = _takeoff_altitude - 0.1;
   if (_state.pose.position.z >= takeoff_complete_altitude && _planner_state == PlanningStates::TAKING_OFF) {
     RCLCPP_INFO(this->get_logger(), "Takeoff complete at z=%.2f (threshold=%.2f), aligning heading to goal",
                 _state.pose.position.z, takeoff_complete_altitude);
